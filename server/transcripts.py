@@ -31,15 +31,16 @@ class TranscriptStore:
         with self._lock:
             return [dict(s) for s in self._load(path)]
 
-    def append(self, path: str, text: str) -> dict:
+    def append(self, path: str, text: str, seconds: float | None = None, status: str = "pending") -> dict:
         with self._lock:
             segments = self._load(path)
             segment = {
                 "id": segments[-1]["id"] + 1 if segments else 1,
                 "text": text,
                 "time": time.time(),
-                "status": "pending",
+                "status": status,
                 "commit": None,
+                "seconds": round(seconds, 1) if seconds is not None else None,
             }
             segments.append(segment)
             self._save(path)

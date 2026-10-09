@@ -23,6 +23,7 @@ type View = 'note' | 'transcript' | 'history'
 
 const STATUS_POLL_MS = 10000
 const SUMMARY_VISIBLE_MS = 4000
+const ERROR_VISIBLE_MS = 10000
 // Bottom bar folding while reading: how far to scroll before it moves, how long to ignore scrolls after it has
 // moved, and how much scrollable room a note needs before folding is worth it.
 const BAR_TOGGLE_PX = 50
@@ -333,6 +334,13 @@ export const App = () => {
   useWakeLock(recording)
   const fullscreen = useFullscreen()
 
+  // An agent error is shown for a while, then cleared, so a failed turn can't leave a pill on screen for good.
+  useEffect(() => {
+    if (agent.state !== 'error') return
+    const timer = setTimeout(() => setAgent({ state: 'idle' }), ERROR_VISIBLE_MS)
+    return () => clearTimeout(timer)
+  }, [agent])
+
   useEffect(() => {
     if (agent.state !== 'idle' || !agent.summary) return
     setSummaryVisible(true)
@@ -462,7 +470,14 @@ export const App = () => {
           </section>
         </aside>
         {pill && (
-          <button className={`agent-pill ${error ? 'error' : agent.state}`} onClick={() => setError(null)}>
+          <button
+            className={`agent-pill ${error ? 'error' : agent.state}`}
+            onClick={() => {
+              setError(null)
+              if (agent.state === 'error') setAgent({ state: 'idle' })
+              setSummaryVisible(false)
+            }}
+          >
             {pill}
           </button>
         )}

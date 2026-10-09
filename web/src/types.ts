@@ -6,6 +6,7 @@ export type Segment = {
   time: number
   status: SegmentStatus
   commit: string | null
+  seconds?: number | null
 }
 
 export type Commit = {

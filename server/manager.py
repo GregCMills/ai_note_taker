@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from pydantic_ai import Agent, RunContext, capture_run_messages
-from pydantic_ai.exceptions import IncompleteToolCall, UsageLimitExceeded
+# UnexpectedModelBehavior covers the model running into its token cap (with or without partial output).
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.messages import ModelResponse, TextPart
 
 from . import config
@@ -149,7 +150,7 @@ class ProjectManager:
                 )
                 reply = next(iter(CONTROL_TOKEN.sub("", result.output).strip().splitlines()), "")
                 turn = result.new_messages()
-            except (UsageLimitExceeded, StopTurn, IncompleteToolCall) as stopped:
+            except (UsageLimitExceeded, StopTurn, UnexpectedModelBehavior) as stopped:
                 log.warning("Project manager stopped early: %s", stopped)
                 reply = "; ".join(deps.actions) or "Sorry, I couldn't do that."
                 turn = [*since_prompt(messages, prompt, len(history)), ModelResponse(parts=[TextPart(reply)])]

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+import wave
 from contextlib import asynccontextmanager
 
 import httpx
@@ -251,19 +252,26 @@ class ProjectSession:
             return
         await hub.send(project, {"type": "agent", "state": "working", "segments": ids})
         STATUS.set(report_status_to(project))
+        failure: Exception | None = None
         for attempt in range(3):
             try:
                 sha, summary, manager_requests = await agents.process(
                     project, batch, settings.system_prompt, ui_hooks(project), viewing.get(project)
                 )
+                failure = None
                 break
             except Exception as error:
                 log.exception("Agent failed on %s", project)
-                await hub.send(project, {"type": "agent", "state": "error", "message": f"LLM error: {error}"})
+                failure = error
+                if attempt == 2:
+                    break
+                await hub.send(project, {"type": "agent", "state": "error", "message": f"LLM error, retrying: {error}"})
                 await asyncio.sleep(3 * (attempt + 1))
-        else:
+                await hub.send(project, {"type": "agent", "state": "working", "segments": ids})
+        if failure is not None:
             changed = transcripts.update(project, ids, status="error")
             await hub.send(project, {"type": "segments", "segments": changed})
+            await hub.send(project, {"type": "agent", "state": "error", "message": f"LLM error, gave up: {failure}"})
             return
 
         changed = transcripts.update(project, ids, status="done", commit=sha)
@@ -291,6 +299,25 @@ def project_summaries() -> list[dict]:
 
 
 PARTIAL_EVERY_S = 1.0
+KEEP_AUDIO_CLIPS = 200
+
+
+def save_segment_audio(project: str, segment_id: int, audio) -> None:
+    """Keep each segment's audio (the most recent per project) so misheard speech can be re-checked later."""
+    folder = config.DATA_DIR / "audio" / project
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        pcm = (audio.clip(-1, 1) * 32767).astype("<i2").tobytes()
+        with wave.open(str(folder / f"S{segment_id}.wav"), "wb") as file:
+            file.setnchannels(1)
+            file.setsampwidth(2)
+            file.setframerate(SAMPLE_RATE)
+            file.writeframes(pcm)
+        clips = sorted(folder.glob("S*.wav"), key=lambda f: int(f.stem[1:]))
+        for old in clips[:-KEEP_AUDIO_CLIPS]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        log.exception("Could not save audio for S%d", segment_id)
 
 
 class Recorder:
@@ -366,13 +393,22 @@ class Recorder:
                 await hub.send(project, {"type": "agent", "state": "error", "message": f"Whisper error: {error}"})
                 text = ""
             await hub.send(project, {"type": "transcribing", "active": False})
-            if text:
-                segment = transcripts.append(project, text)
+            seconds = len(audio) / SAMPLE_RATE
+            if not text:
+                # Don't let speech vanish silently: show that audio arrived but nothing was recognised.
+                log.info("Nothing recognised in %.1fs of audio for %s", seconds, project)
+                segment = transcripts.append(project, f"(nothing recognised in {seconds:.1f} s of audio)", seconds, "error")
+                save_segment_audio(project, segment["id"], audio)
                 await hub.send(project, {"type": "segments", "segments": [segment]})
-                if project == MANAGER_SCOPE:
-                    manager_session.add_speech(segment)
-                else:
-                    session(project).add(segment)
+                continue
+            segment = transcripts.append(project, text, seconds)
+            save_segment_audio(project, segment["id"], audio)
+            log.info("S%d: %.1fs of audio -> %d words", segment["id"], seconds, len(text.split()))
+            await hub.send(project, {"type": "segments", "segments": [segment]})
+            if project == MANAGER_SCOPE:
+                manager_session.add_speech(segment)
+            else:
+                session(project).add(segment)
 
 
 async def load_whisper() -> None:

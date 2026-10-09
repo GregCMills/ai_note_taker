@@ -22,6 +22,7 @@ export const TranscriptPanel = ({ segments, transcribing }: TranscriptPanelProps
         <div key={segment.id} className={`segment ${segment.status}`}>
           <div className="segment-meta">
             <span className="segment-id">S{segment.id}</span>
+            {segment.seconds != null && <span>{segment.seconds.toFixed(1)} s</span>}
             <span>{STATUS_LABEL[segment.status]}</span>
             {segment.commit && <code>{segment.commit.slice(0, 7)}</code>}
           </div>

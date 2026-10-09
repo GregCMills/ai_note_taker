@@ -21,7 +21,8 @@ from dataclasses import dataclass, field, replace
 from typing import Awaitable, Callable, Literal
 
 from pydantic_ai import Agent, RunContext, capture_run_messages
-from pydantic_ai.exceptions import IncompleteToolCall, UsageLimitExceeded
+# UnexpectedModelBehavior covers the model running into its token cap (with or without partial output).
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -430,7 +431,7 @@ class NoteAgents:
                     # The model sometimes claims success after failed edits; report what actually happened.
                     summary = f"couldn't make that change ({sorted(deps.failure_messages)[0][:120]})"
                 turn = result.new_messages()
-            except (UsageLimitExceeded, StopTurn, IncompleteToolCall) as stopped:
+            except (UsageLimitExceeded, StopTurn, UnexpectedModelBehavior) as stopped:
                 log.warning("Scribe stopped early on %s: %s", project, stopped)
                 summary = "; ".join(deps.actions) or "stopped: could not make that change"
                 turn = [*since_prompt(messages, prompt, len(history)), ModelResponse(parts=[TextPart(summary)])]
