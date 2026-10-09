@@ -22,6 +22,11 @@ type View = 'note' | 'transcript' | 'history'
 
 const STATUS_POLL_MS = 10000
 const SUMMARY_VISIBLE_MS = 4000
+// Bottom bar folding while reading: how far to scroll before it moves, how long to ignore scrolls after it has
+// moved, and how much scrollable room a note needs before folding is worth it.
+const BAR_TOGGLE_PX = 50
+const BAR_SETTLE_MS = 400
+const BAR_MIN_ROOM_PX = 400
 const LAST_PROJECT_KEY = 'notetaker:last-project'
 
 const buzz = () => {
@@ -82,7 +87,7 @@ export const App = () => {
   const [agentStep, setAgentStep] = useState<AgentStep | null>(null)
   const [managerData, setManagerData] = useState<ManagerData | null>(null)
   const [barHidden, setBarHidden] = useState(false)
-  const lastScroll = useRef(0)
+  const barScroll = useRef({ last: 0, travel: 0, settleUntil: 0, hidden: false })
   const [editing, setEditing] = useState(false)
   const [summaryVisible, setSummaryVisible] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -332,13 +337,31 @@ export const App = () => {
   const allReady = connected && status?.whisper.state === 'ready' && status.llm === 'ready'
   const statusClass = allReady ? 'ok' : status?.whisper.state === 'loading' ? 'wait' : 'bad'
   const pill = error ?? (agent.state === 'idle' && !summaryVisible ? '' : describeAgent(agent, current !== null))
-  // The bottom bar slides away while scrolling down to read and comes back on scrolling up (never while recording).
+  // The bottom bar folds away while scrolling down to read and comes back on scrolling up (never while recording).
+  // Folding it changes the note's height, which nudges the scroll position, so scrolls right after a fold are
+  // ignored and only a deliberate scroll in one direction counts. Otherwise the bar flickers up and down.
   const hideBarWhileReading = (event: React.UIEvent<HTMLElement>) => {
-    const y = event.currentTarget.scrollTop
-    const delta = y - lastScroll.current
-    lastScroll.current = y
-    if (y < 40 || delta < -6) setBarHidden(false)
-    else if (delta > 6) setBarHidden(true)
+    const pane = event.currentTarget
+    const state = barScroll.current
+    const delta = pane.scrollTop - state.last
+    state.last = pane.scrollTop
+    const now = performance.now()
+    if (now < state.settleUntil) return
+    const setHidden = (hidden: boolean) => {
+      if (hidden === state.hidden) return
+      state.hidden = hidden
+      state.travel = 0
+      state.settleUntil = now + BAR_SETTLE_MS
+      setBarHidden(hidden)
+    }
+    const room = pane.scrollHeight - pane.clientHeight
+    if (pane.scrollTop < BAR_TOGGLE_PX || room < BAR_MIN_ROOM_PX) {
+      setHidden(false)
+      return
+    }
+    state.travel = Math.sign(delta) === Math.sign(state.travel) ? state.travel + delta : delta
+    if (state.travel > BAR_TOGGLE_PX) setHidden(true)
+    else if (state.travel < -BAR_TOGGLE_PX) setHidden(false)
   }
 
   const toggleView = (next: View) => setView((previous) => (previous === next ? 'note' : next))

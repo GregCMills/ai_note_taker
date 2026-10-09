@@ -166,6 +166,8 @@ html:fullscreen {
 }
 
 .pane-note {
+  /* The bottom bar folding changes this pane's height; anchoring would then nudge the scroll position. */
+  overflow-anchor: none;
   display: flex;
   flex-direction: column;
   min-width: 0;
