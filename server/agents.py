@@ -240,7 +240,8 @@ class ScribeDeps:
     hooks: UiHooks
     actions: list[str] = field(default_factory=list)
     failure_messages: set[str] = field(default_factory=set)
-    calls: set[tuple] = field(default_factory=set)
+    calls: dict[tuple, str | None] = field(default_factory=dict)  # call -> None if it worked, else its error
+    last_call: tuple | None = None
     manager_requests: list[str] = field(default_factory=list)
 
     def find(self, section_id: int) -> tuple[str, Section] | None:
@@ -263,6 +264,8 @@ class ScribeDeps:
         return f"Notes now: {notes}"
 
     def fail(self, message: str) -> str:
+        if self.last_call is not None:
+            self.calls[self.last_call] = message
         # Count distinct problems: several calls sent at once that hit the same error are one mistake, not many.
         self.failure_messages.add(message)
         if len(self.failure_messages) >= MAX_TOOL_FAILURES:
@@ -279,10 +282,19 @@ class ScribeDeps:
         return None
 
     def repeated(self, *call) -> str | None:
-        """Refuse an edit identical to one already made this turn (the model sometimes loops on success)."""
+        """Refuse a call identical to one already made this turn: the model sometimes loops on success, and
+        sometimes retries a failed call unchanged. The reply says which, so a failure is never reported as done."""
         if call in self.calls:
-            return self.fail("that exact change was already made this turn; it is done, so stop and reply")
-        self.calls.add(call)
+            earlier = self.calls[call]
+            self.last_call = None
+            if earlier is None:
+                return self.fail("that exact change was already made this turn; it is done, so stop and reply")
+            return self.fail(
+                f"you already tried exactly this and it failed ({earlier}). Nothing was changed. Fix the call: "
+                "the notes in the latest message are the current text, so copy old_text from there"
+            )
+        self.calls[call] = None
+        self.last_call = call
         return None
 
 
@@ -375,12 +387,26 @@ class NoteAgents:
         collapsed = await self._collapse(docs, memory)
         deps = ScribeDeps(project, docs, active, memory, collapsed, system_prompt, hooks)
         speech = "\n".join(f"S{s['id']}: {s['text']}" for s in segments)
-        commits = "\n".join(describe_commit(c) for c in self.notes.log(project, config.RECENT_COMMITS_IN_CONTEXT))
+        recent = self.notes.log(project, config.RECENT_COMMITS_IN_CONTEXT)
+        commits = "\n".join(describe_commit(c) for c in recent)
+        # Commits newer than the scribe's own last one were made by the user (hand edits, reverts, restores).
+        by_hand = []
+        for commit in recent:
+            if commit["subject"].startswith("[S"):
+                break
+            by_hand.append(commit["subject"])
+        hand_note = (
+            f"Since your last turn the user changed the notes by hand ({'; '.join(by_hand)}). The notes below are "
+            "the current text: trust them over anything you remember writing.\n\n"
+            if by_hand
+            else ""
+        )
         tabs = ", ".join(f'"{n}"' + (" (active: the user is looking at this one)" if n == active else "") for n in docs)
         prompt = (
             f'Project "{project}" has these notes, shown as tabs: {tabs}\n\n'
             f"{render_project(docs, active, collapsed)}\n\n"
             f"Recent changes (newest first; ask_history can undo or restore any of these):\n{commits}\n\n"
+            f"{hand_note}"
             f"Update the notes as per this transcription:\n{speech}\n\n"
             f"Remember this, the user's instructions for this project:\n{memory.instructions or '(none yet)'}"
         )
@@ -400,6 +426,9 @@ class NoteAgents:
                 )
                 # Only the first line: the model sometimes echoes the whole note after its summary.
                 summary = next(iter(CONTROL_TOKEN.sub("", result.output).strip().splitlines()), "")
+                if not deps.actions and deps.failure_messages:
+                    # The model sometimes claims success after failed edits; report what actually happened.
+                    summary = f"couldn't make that change ({sorted(deps.failure_messages)[0][:120]})"
                 turn = result.new_messages()
             except (UsageLimitExceeded, StopTurn, IncompleteToolCall) as stopped:
                 log.warning("Scribe stopped early on %s: %s", project, stopped)

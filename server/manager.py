@@ -82,7 +82,7 @@ class ManagerDeps:
 
     def repeated(self, *call) -> str | None:
         if call in self.calls:
-            return self.fail("that exact change was already made this turn; it is done, so stop and reply")
+            return self.fail("you already made exactly this call this turn; do not repeat it, reply instead")
         self.calls.add(call)
         return None
 
