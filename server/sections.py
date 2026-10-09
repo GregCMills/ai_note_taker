@@ -10,10 +10,34 @@ from dataclasses import dataclass
 
 MARKER = re.compile(r"^<!-- §(\d+) -->[ \t]*\n?", re.MULTILINE)
 HEADING = re.compile(r"^#{1,6}\s", re.MULTILINE)
+LINE_NUMBER = re.compile(r"^\[\d+\] ?", re.MULTILINE)
 
 
 def estimate_tokens(text: str) -> int:
     return len(text) * 2 // 7
+
+
+# Every line with text in a note has a number, counted from 1 per note; blank lines and section markers don't count.
+# The app shows the same numbers beside the note (web/src/highlight.ts), so the user can say "delete line 23".
+
+
+def count_lines(text: str) -> int:
+    return sum(1 for line in text.split("\n") if line.strip())
+
+
+def number_lines(text: str, first: int) -> str:
+    """Prefix each line with text with its number, e.g. "[23] It was raining."."""
+    numbered, line = [], first
+    for row in text.split("\n"):
+        if row.strip():
+            row, line = f"[{line}] {row}", line + 1
+        numbered.append(row)
+    return "\n".join(numbered)
+
+
+def strip_line_numbers(text: str) -> str:
+    """Remove line numbers the scribe copied from its view of the note; they are not part of the text."""
+    return LINE_NUMBER.sub("", text)
 
 
 @dataclass
@@ -114,27 +138,37 @@ class Document:
     def tokens(self) -> int:
         return estimate_tokens(self.serialize())
 
+    def first_line(self, section: Section) -> int:
+        """The line number of the section's first line of text."""
+        return 1 + sum(count_lines(s.text) for s in self.sections[: self.sections.index(section)])
+
     def render(self, collapsed: dict[int, Collapse]) -> str:
-        """The scribe's view: full sections, or summaries (of all or the top part of a section) for ids in `collapsed`."""
+        """The scribe's view, with line numbers: full sections, or summaries (of all or the top part of a section) for
+        ids in `collapsed`."""
         if not self.sections:
             return "(empty note)"
-        blocks = []
+        blocks, line = [], 1
         for s in self.sections:
             fold = collapsed.get(s.id)
+            first, line = line, line + count_lines(s.text)
             if fold is not None and fold.keep_from is None:
                 blocks.append(
                     f'<section id="{s.id}" collapsed>\n{s.title}\nSummary: {fold.summary}\n'
                     f"(call open_section({s.id}) for the full text)\n</section>"
                 )
             elif fold is not None:
-                heading = s.text[: s.body_start()].strip()
+                heading = number_lines(s.text[: s.body_start()].strip(), first)
+                before = s.text[: fold.keep_from]
+                # The kept text can start partway through a line (at a sentence end), which keeps that line's number.
+                mid_line = before.split("\n")[-1].strip() != ""
+                tail = number_lines(s.text[fold.keep_from:].strip(), first + count_lines(before) - mid_line)
                 blocks.append(
                     f'<section id="{s.id}" partly-collapsed>\n{heading}\n'
                     f"[Earlier part of this section, summarised: {fold.summary} (call open_section({s.id}) to read it in full)]\n"
-                    f"{s.text[fold.keep_from:].strip()}\n</section>"
+                    f"{tail}\n</section>"
                 )
             else:
-                blocks.append(f'<section id="{s.id}">\n{s.text.strip()}\n</section>')
+                blocks.append(f'<section id="{s.id}">\n{number_lines(s.text.strip(), first)}\n</section>')
         return "\n".join(blocks)
 
 

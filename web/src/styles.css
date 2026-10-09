@@ -246,12 +246,43 @@ html:fullscreen {
   max-width: 760px;
   margin: 0 auto;
   padding: 8px 18px 32px;
-  padding-left: max(18px, env(safe-area-inset-left));
+  padding-left: max(10px, env(safe-area-inset-left));
   padding-right: max(18px, env(safe-area-inset-right));
 }
 
 .markdown {
+  position: relative;
+  padding-left: 30px;
   overflow-wrap: anywhere;
+}
+
+/* Line numbers in a gutter, the same numbers the agent sees, so you can say "delete line 23". Each sits on its
+   block's first line (no top set) at the left of the note, however deeply the block is nested. */
+.markdown [data-line]::before {
+  content: attr(data-line);
+  position: absolute;
+  right: calc(100% - 24px);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: inherit;
+  text-align: right;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+/* Drop each number onto its block's first line of text, which is taller than the number's own line. */
+.markdown [data-line]::before {
+  margin-top: 5px;
+}
+
+.markdown h1[data-line]::before {
+  margin-top: 16px;
+}
+
+.markdown h2[data-line]::before {
+  margin-top: 9px;
 }
 
 .markdown h1 {

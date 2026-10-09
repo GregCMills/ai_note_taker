@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify'
 import { Marked, Renderer, type Token, type Tokens } from 'marked'
 
-type Flagged = { changed?: boolean }
+type Flagged = { changed?: boolean; line?: string }
 
 const SECTION_MARKER = /^<!-- §(\d+) -->/
 
@@ -9,10 +9,39 @@ const markdown = new Marked({
   renderer: {
     listitem(item: Tokens.ListItem & Flagged) {
       const html = Renderer.prototype.listitem.call(this, item)
-      return item.changed ? html.replace(/^<li/, '<li class="changed"') : html
+      const line = item.line ? ` data-line="${item.line}"` : ''
+      return html.replace(/^<li/, `<li${item.changed ? ' class="changed"' : ''}${line}`)
     },
   },
 })
+
+/**
+ * Numbers blocks by the note's lines: every line with text counts, blank lines and section markers don't. The
+ * scribe sees the same numbers (server/sections.py), so "delete line 23" means the same line to both.
+ * Blocks must be numbered in order; each call returns the next block's number, or its range if it spans lines.
+ */
+const lineNumberer = (content: string) => {
+  const lines = content
+    .split('\n')
+    .map((line) => line.replace(SECTION_MARKER, '').trim())
+    .filter(Boolean)
+  let cursor = 0
+  return (raw: string, spans: boolean): string | undefined => {
+    const own = raw.split('\n').map((line) => line.trim()).filter(Boolean)
+    const at = own[0] === undefined ? -1 : lines.indexOf(own[0], cursor)
+    if (at === -1) return undefined
+    const last = spans ? at + own.length : at + 1
+    cursor = last
+    return last - at > 1 ? `${at + 1}–${last}` : `${at + 1}`
+  }
+}
+
+const numberItems = (list: Tokens.List, number: ReturnType<typeof lineNumberer>) => {
+  for (const item of list.items as (Tokens.ListItem & Flagged)[]) {
+    item.line = number(item.raw, false)
+    for (const child of item.tokens) if (child.type === 'list') numberItems(child as Tokens.List, number)
+  }
+}
 
 const listItems = (tokens: Token[]) =>
   tokens.flatMap((token) => (token.type === 'list' ? (token as Tokens.List).items : []))
@@ -27,20 +56,24 @@ export const renderNote = (content: string, baseline: string | null): string => 
   const oldBlocks = new Set(previous?.map((token) => token.raw.trim()))
   const oldItems = new Set(previous && listItems(previous).map((item) => item.raw.trim()))
 
+  const number = lineNumberer(content)
+
   const renderToken = (token: Token): string => {
     const rendered = (flagged: Token[]) => markdown.parser(Object.assign(flagged, { links: tokens.links }))
     const marker = token.type === 'html' ? SECTION_MARKER.exec(token.raw) : null
     // Hidden section markers become anchors, so the view can scroll to wherever the agent is editing.
     if (marker) return `<span class="section-anchor" data-section="${marker[1]}"></span>`
-    if (previous === null || token.type === 'space' || token.type === 'html') return rendered([token])
+    if (token.type === 'space' || token.type === 'html') return rendered([token])
     if (token.type === 'list') {
+      numberItems(token as Tokens.List, number)
       for (const item of (token as Tokens.List).items as (Tokens.ListItem & Flagged)[]) {
-        item.changed = !oldItems.has(item.raw.trim())
+        item.changed = previous !== null && !oldItems.has(item.raw.trim())
       }
       return rendered([token])
     }
-    const block = rendered([token])
-    return oldBlocks.has(token.raw.trim()) ? block : `<div class="changed">${block}</div>`
+    const line = number(token.raw, true)
+    const block = line ? rendered([token]).replace(/^<(\w+)/, `<$1 data-line="${line}"`) : rendered([token])
+    return previous === null || oldBlocks.has(token.raw.trim()) ? block : `<div class="changed">${block}</div>`
   }
 
   // Where text was removed, which has no highlight of its own: just before the unchanged tail of the note.

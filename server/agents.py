@@ -44,7 +44,16 @@ from . import config
 from .agentlog import AgentLog, slim_messages
 from .memory import MemoryStore, NoteMemory, SectionInfo
 from .notes import NoteError, NoteStore
-from .sections import Collapse, Document, Section, estimate_tokens, number_sections, split_at_headings
+from .sections import (
+    Collapse,
+    Document,
+    Section,
+    estimate_tokens,
+    number_lines,
+    number_sections,
+    split_at_headings,
+    strip_line_numbers,
+)
 
 log = logging.getLogger(__name__)
 
@@ -146,6 +155,7 @@ Notes are split into sections whose ids are unique across the whole project. In 
 - To move text, add it in its new place and remove it from the old one in the same turn; to move a whole section, use move_section. Never delete and recreate a note to change something inside it.
 - Leave no empty or duplicate headings behind.
 - In stories, record what the story says. A word spoken in dialogue is not a character's name unless the story uses it as one.
+- Every line of text is shown with its line number, like "[23] It was raining.". The user sees the same numbers beside the note, counted per note, so "line 23", "text 23" or "number 23" means that line of the note they are looking at (the active one) unless they name another. The numbers are not part of the text: never write them in old_text, new_text or anything else.
 - Keep old_text short: just the words being changed, enough to be unique, never the whole section. To add to the end of a section, use its last sentence or line as old_text and repeat it in new_text followed by the addition.
 - Make one edit per section that needs changing, including sections the user's instructions ask you to keep up to date. When a tool replies OK that change is done: go on to the next change or reply, and never send the same call twice. Each reply lists the notes and sections as they are now.
 - Never invent content the user did not say.
@@ -594,6 +604,7 @@ class NoteAgents:
                 new_text: Replacement text.
             """
             deps = ctx.deps
+            old_text, new_text = strip_line_numbers(old_text), strip_line_numbers(new_text)
             if refused := deps.copied_shortened(new_text) or deps.repeated("edit", section_id, old_text, new_text):
                 return refused
             if old_text == new_text:
@@ -647,6 +658,7 @@ class NoteAgents:
                 text: The text to insert. It goes on a new line (a new paragraph) if after_text ends a line.
             """
             deps = ctx.deps
+            after_text, text = strip_line_numbers(after_text), strip_line_numbers(text)
             if refused := deps.copied_shortened(text) or deps.repeated("insert", section_id, after_text, text):
                 return refused
             found = deps.find(section_id)
@@ -690,6 +702,7 @@ class NoteAgents:
                 note: Which note to add a new section to. Omit for the active note.
             """
             deps = ctx.deps
+            content = strip_line_numbers(content)
             if refused := deps.copied_shortened(content) or deps.repeated("write", content, section_id, after_section_id, note):
                 return refused
             if section_id is not None:
@@ -839,7 +852,8 @@ class NoteAgents:
                 return ctx.deps.fail(f"no section {section_id}")
             ctx.deps.collapsed.pop(section_id, None)
             ctx.deps.memory.touch(section_id)
-            return found[1].text
+            note, section = found
+            return number_lines(section.text.strip(), ctx.deps.docs[note].first_line(section))
 
         @scribe.tool
         async def set_instructions(ctx: RunContext[ScribeDeps], instructions: str) -> str:
