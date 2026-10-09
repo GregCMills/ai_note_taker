@@ -89,6 +89,33 @@ class NoteStore:
             self._git("commit", "-q", "-m", f"Rename project {old} to {new}")
         return new
 
+    def deleted_projects(self) -> list[dict]:
+        """Projects that were deleted and can be brought back, most recently deleted first."""
+        out = self._git("log", "--diff-filter=D", f"--format={RECORD}%H{FIELD}%ct", "--name-only", "--", f"*/{ORDER_FILE}")
+        found: dict[str, dict] = {}
+        for record in out.split(RECORD):
+            lines = [line for line in record.strip().splitlines() if line.strip()]
+            if not lines:
+                continue
+            sha, time = lines[0].split(FIELD)
+            for path in lines[1:]:
+                name = path.split("/")[0]
+                if name not in found and not self.project_exists(name):
+                    found[name] = {"name": name, "sha": sha, "time": int(time)}
+        return list(found.values())
+
+    def undelete_project(self, project: str) -> str:
+        """Bring back a deleted project exactly as it was just before it was deleted."""
+        wanted = clean_name(project, "project")
+        match = next((d for d in self.deleted_projects() if d["name"].lower() == wanted.lower()), None)
+        if match is None:
+            raise NoteError(f"No deleted project called {wanted}")
+        name = match["name"]
+        with self._lock:
+            self._git("checkout", f"{match['sha']}^", "--", name)
+            self._git("commit", "-q", "-m", f"Restore deleted project {name}", "--", name)
+        return name
+
     # ---- notes (tabs) -------------------------------------------------------------------------
 
     def _file(self, project: str, note: str) -> Path:

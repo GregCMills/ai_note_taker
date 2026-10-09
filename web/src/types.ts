@@ -60,6 +60,9 @@ export type ServerEvent =
   | { type: 'instructions'; project: string; instructions: string }
   | { type: 'partial'; project: string; text: string }
   | { type: 'activity'; project: string }
+  | { type: 'agent_step'; project: string; step: AgentStep['step']; detail: string }
+  | { type: 'open_project'; project: string; name: string }
+  | { type: 'project_closed'; project: string }
   | ({ type: 'agent'; project?: string } & AgentState)
 
 export type LoggedPart = {
@@ -107,4 +110,14 @@ export type Activity = {
     history_summary: string
   }
   turns: ActivityTurn[]
+}
+
+export const MANAGER_SCOPE = '.manager'
+
+export type AgentStep = { step: 'thinking' | 'tool' | 'context'; detail: string }
+
+export type ManagerData = {
+  segments: Segment[]
+  turns: { time: number; speech: string; reply: string; actions: string[] }[]
+  deleted: { name: string; time: number }[]
 }

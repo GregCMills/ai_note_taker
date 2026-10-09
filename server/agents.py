@@ -22,9 +22,12 @@ from typing import Awaitable, Callable, Literal
 from pydantic_ai import Agent, RunContext, capture_run_messages
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.messages import (
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    PartStartEvent,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -51,6 +54,29 @@ SHRINK_GUARD_WORDS = 80
 
 class StopTurn(Exception):
     """Ends a scribe turn that keeps failing; edits made so far are kept."""
+
+# Live status for the UI (the AI button): "thinking", "tool" or "context", reported while agents work.
+STATUS: ContextVar[Callable[[str, str], Awaitable[None]] | None] = ContextVar("status", default=None)
+# Tools that read the note rather than change it are shown as the context agent at work.
+CONTEXT_TOOLS = {"open_section"}
+
+
+async def report(step: str, detail: str = "") -> None:
+    if (callback := STATUS.get()) is not None:
+        await callback(step, detail)
+
+
+async def stream_status(_ctx, events) -> None:
+    """Turns an agent run's event stream into live status: thinking, using a tool, or reading context."""
+    async for event in events:
+        if isinstance(event, FunctionToolCallEvent):
+            name = event.part.tool_name
+            await report("context" if name in CONTEXT_TOOLS else "tool", name)
+        elif isinstance(event, FunctionToolResultEvent):
+            await report("thinking")
+        elif isinstance(event, PartStartEvent) and event.part.part_kind == "thinking":
+            await report("thinking", "reasoning")
+
 
 # Sub-agent runs (historian, librarian) made during the current scribe turn, for the activity log.
 SUBRUNS: ContextVar[list[dict] | None] = ContextVar("subruns", default=None)
@@ -89,6 +115,7 @@ Notes are split into sections whose ids are unique across the whole project. In 
 - Commands about the notes are not content. Carry them out literally and never write them into a note, even in another style or form.
   - "Clear the note", "start over": delete every section of that note with write_section(section_id=..., content="").
   - "Delete this note/tab": manage_note(action="delete"). "Go to the X note": manage_note(action="open").
+  - Anything about whole projects (new project, rename/delete/restore a project, switch to another project): ask_project_manager.
   - Undo, redo, "scrap that", "go back to before X", "put it back": call ask_history with just that request, then make any other changes yourself.
   - Corrections ("no, I meant Tuesday") are ordinary edits.
   - Guidance on how to take notes ("put action items first", "keep it brief"): save it with set_instructions, merged with the existing instructions.
@@ -183,6 +210,7 @@ class ScribeDeps:
     actions: list[str] = field(default_factory=list)
     failures: int = 0
     calls: set[tuple] = field(default_factory=set)
+    manager_requests: list[str] = field(default_factory=list)
 
     def find(self, section_id: int) -> tuple[str, Section] | None:
         for note, doc in self.docs.items():
@@ -246,8 +274,11 @@ class NoteAgents:
 
     async def process(
         self, project: str, segments: list[dict], system_prompt: str, hooks: UiHooks, viewing: str | None = None
-    ) -> tuple[str | None, str]:
-        """Fold new speech into the project's notes. Returns (commit sha or None, one-line summary)."""
+    ) -> tuple[str | None, str, list[str]]:
+        """Fold new speech into the project's notes.
+
+        Returns (commit sha or None, one-line summary, requests for the project manager to run after this turn).
+        """
         started = time.monotonic()
         subruns: list[dict] = []
         SUBRUNS.set(subruns)
@@ -273,6 +304,7 @@ class NoteAgents:
         history = memory.history()
         instructions = scribe_instructions(system_prompt, memory)
         history_tokens = sum(estimate_tokens(describe_turn(t)) for t in memory.turns)
+        await report("thinking")
         with capture_run_messages() as messages:
             try:
                 result = await self.scribe.run(
@@ -280,6 +312,7 @@ class NoteAgents:
                     deps=deps,
                     message_history=history,
                     usage_limits=UsageLimits(request_limit=config.LLM_MAX_STEPS),
+                    event_stream_handler=stream_status,
                 )
                 # Only the first line: the model sometimes echoes the whole note after its summary.
                 summary = next(iter(CONTROL_TOKEN.sub("", result.output).strip().splitlines()), "")
@@ -316,7 +349,7 @@ class NoteAgents:
             "messages": slim_messages(turn),
             "subruns": subruns,
         })
-        return sha, summary or "; ".join(deps.actions) or "no change"
+        return sha, summary or "; ".join(deps.actions) or "no change", deps.manager_requests
 
     # ---- context management -------------------------------------------------------------------
 
@@ -353,6 +386,7 @@ class NoteAgents:
         info = memory.sections.setdefault(section.id, SectionInfo())
         if info.digest != section.digest or not info.summary:
             started = time.monotonic()
+            await report("context", f"summarising §{section.id}")
             result = await self.librarian.run(
                 "Summarise this note section in at most two sentences, so an assistant knows what it "
                 f"contains and when it would need to open it:\n\n{section.text}"
@@ -374,6 +408,7 @@ class NoteAgents:
             return
         transcript = "\n\n".join(describe_turn(turn) for turn in old)
         started = time.monotonic()
+        await report("context", "summarising older conversation")
         result = await self.librarian.run(
             "Below is the running summary of a note-taking session, then older turns that are leaving the "
             "assistant's context. Write an updated summary of the conversation, under 200 words. The assistant "
@@ -616,6 +651,7 @@ class NoteAgents:
                 f"Request: {request}\n\nRecent commits (newest first):\n{commits}",
                 deps=historian,
                 usage_limits=UsageLimits(request_limit=6),
+                event_stream_handler=stream_status,
             )
             record_subrun("historian", request, result, started)
             if not historian.restored:
@@ -627,6 +663,18 @@ class NoteAgents:
             await deps.hooks.tabs_changed(deps.active)
             await deps.hooks.notes_changed(list(deps.docs), deps.active, None)
             return f"{result.output}\n\nThe notes now read:\n{render_project(deps.docs, deps.active, deps.collapsed)}"
+
+        @scribe.tool
+        async def ask_project_manager(ctx: RunContext[ScribeDeps], request: str) -> str:
+            """Ask the project manager to create, rename, delete, restore or switch to a project (not a note in
+            this project: use manage_note for those). It acts as soon as this turn is finished.
+
+            Args:
+                request: What the user wants, in their words plus any detail you know.
+            """
+            ctx.deps.manager_requests.append(request)
+            ctx.deps.actions.append("asked project manager")
+            return "OK, passed to the project manager. It will act as soon as you finish this turn."
 
         return scribe
 

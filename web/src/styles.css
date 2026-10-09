@@ -961,6 +961,133 @@ html:fullscreen {
   height: 0;
 }
 
+/* ---- agent button ------------------------------------------------------------------------ */
+
+.agent-button {
+  position: relative;
+}
+
+.agent-button.working {
+  color: var(--accent);
+}
+
+.agent-spinner {
+  position: absolute;
+  inset: 5px;
+  border: 2px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- project manager screen -------------------------------------------------------------- */
+
+.manager-row {
+  border-bottom: 1px solid var(--border);
+}
+
+.manager-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 14px max(var(--edge), env(safe-area-inset-left)) 24px;
+}
+
+.manager-projects {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.project-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 64px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-card:active {
+  transform: scale(0.97);
+}
+
+.project-card .project-name {
+  width: 100%;
+  font-weight: 600;
+}
+
+.project-card.new {
+  justify-content: center;
+  border-style: dashed;
+  color: var(--muted);
+}
+
+.manager-deleted {
+  margin: 0;
+}
+
+.manager-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-pair {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-bubble {
+  max-width: 85%;
+  padding: 9px 13px;
+  border-radius: 16px;
+  white-space: pre-wrap;
+}
+
+.chat-bubble.you {
+  align-self: flex-end;
+  border-bottom-right-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.chat-bubble .live-working {
+  color: inherit;
+}
+
+.chat-bubble.you.live {
+  opacity: 0.75;
+  font-style: italic;
+}
+
+.chat-bubble.manager {
+  align-self: flex-start;
+  border-bottom-left-radius: 4px;
+  background: var(--surface-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-spinner {
+    animation-duration: 3s;
+  }
+}
+
 /* ---- dialog ------------------------------------------------------------------------------ */
 
 .dialog-backdrop {

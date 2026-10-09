@@ -13,9 +13,10 @@ from pydantic import BaseModel
 
 from . import config
 from .agentlog import AgentLog
-from .agents import NoteAgents, UiHooks, describe_turn
+from .agents import STATUS, NoteAgents, UiHooks, describe_turn
 from .audio import SAMPLE_RATE, Segmenter, Transcriber
 from .hub import Hub
+from .manager import MANAGER_SCOPE, ManagerHooks, ProjectManager
 from .memory import MemoryStore
 from .notes import NoteError, NoteStore, clean_name
 from .sections import Document, estimate_tokens
@@ -34,6 +35,7 @@ hub = Hub()
 memories = MemoryStore(config.DATA_DIR / "memory")
 activity = AgentLog(config.DATA_DIR / "agentlog")
 agents = NoteAgents(notes, memories, activity)
+manager = ProjectManager(agents)
 transcriber = Transcriber(
     config.WHISPER_MODEL, config.WHISPER_DEVICE, config.WHISPER_COMPUTE_TYPE, config.WHISPER_LANGUAGE
 )
@@ -78,6 +80,143 @@ def ui_hooks(project: str) -> UiHooks:
     return UiHooks(notes_changed, tabs_changed)
 
 
+def report_status_to(*scopes: str):
+    """Live agent status (thinking / tool / context) for the AI button of everyone viewing these scopes."""
+
+    async def send(step: str, detail: str) -> None:
+        for scope in dict.fromkeys(scopes):
+            await hub.send(scope, {"type": "agent_step", "step": step, "detail": detail})
+
+    return send
+
+
+# ---- project operations, shared by the REST endpoints and the project manager agent ----------------
+
+async def create_project_op(name: str) -> str:
+    created = notes.create_project(name)
+    await push_projects()
+    return created
+
+
+async def delete_projects_op(names: list[str]) -> None:
+    names = [clean_name(n, "project") for n in names]
+    for name in names:
+        await session(name).lock.acquire()
+    try:
+        notes.delete_projects(names)
+        for name in names:
+            transcripts.delete(name)
+            memories.delete(name)
+            activity.delete(name)
+            viewing.pop(name, None)
+    finally:
+        for name in names:
+            session(name).lock.release()
+            sessions.pop(name, None)
+    for name in names:
+        await hub.send(name, {"type": "project_closed"})
+    await push_projects()
+
+
+async def rename_project_op(old: str, new: str) -> str:
+    old = clean_name(old, "project")
+    async with session(old).lock:
+        new = notes.rename_project(old, new)
+        transcripts.rename(old, new)
+        memories.rename(old, new)
+        activity.rename(old, new)
+    sessions.pop(old, None)
+    viewing.pop(old, None)
+    await hub.send(old, {"type": "open_project", "name": new})
+    await push_projects()
+    return new
+
+
+async def undelete_project_op(name: str) -> str:
+    restored = notes.undelete_project(name)
+    await push_projects()
+    return restored
+
+
+async def restore_version_op(project: str, sha: str) -> None:
+    project = clean_name(project, "project")
+    async with session(project).lock:
+        notes.restore(project, sha)
+        notes.commit(project, f"Restore to {sha[:7]}")
+    await _after_history_change(project)
+
+
+def manager_hooks(origin: str) -> ManagerHooks:
+    """`origin` is where the request came from (a project, or the manager screen): "open" switches that view."""
+
+    async def open_project(name: str) -> None:
+        await hub.send(origin, {"type": "open_project", "name": name})
+
+    return ManagerHooks(
+        create_project_op, rename_project_op, delete_projects_op, undelete_project_op, restore_version_op, open_project
+    )
+
+
+class ManagerSession:
+    """Runs the project manager over speech from the manager screen and requests passed on by scribes."""
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self._pending: list[dict] = []
+        self._task: asyncio.Task | None = None
+
+    def add_speech(self, segment: dict) -> None:
+        self._add({"segments": [segment], "origin": None})
+
+    def add_request(self, request: str, origin: str) -> None:
+        self._add({"request": request, "origin": origin})
+
+    def _add(self, item: dict) -> None:
+        self._pending.append(item)
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        while self._pending:
+            item = self._pending.pop(0)
+            # Consecutive speech is handled together, like a scribe batch.
+            while "segments" in item and self._pending and "segments" in self._pending[0]:
+                item["segments"] += self._pending.pop(0)["segments"]
+            async with self.lock:
+                await self._process(item)
+
+    async def _process(self, item: dict) -> None:
+        origin = item["origin"]
+        scopes = [MANAGER_SCOPE] + ([origin] if origin else [])
+        segments = item.get("segments", [])
+        ids = [s["id"] for s in segments]
+        if segments:
+            text = "New speech from the user:\n" + "\n".join(f"S{s['id']}: {s['text']}" for s in segments)
+        else:
+            text = f"Request from the note-taking assistant in \"{origin}\", on the user's behalf:\n{item['request']}"
+        for scope in scopes:
+            await hub.send(scope, {"type": "agent", "state": "working", "segments": ids})
+        STATUS.set(report_status_to(*scopes))
+        try:
+            reply, _ = await manager.handle(text, origin, manager_hooks(origin or MANAGER_SCOPE))
+        except Exception as error:
+            log.exception("Project manager failed")
+            for scope in scopes:
+                await hub.send(scope, {"type": "agent", "state": "error", "message": f"Project manager error: {error}"})
+            if ids:
+                await hub.send(MANAGER_SCOPE, {"type": "segments", "segments": transcripts.update(MANAGER_SCOPE, ids, status="error")})
+            return
+        if ids:
+            await hub.send(MANAGER_SCOPE, {"type": "segments", "segments": transcripts.update(MANAGER_SCOPE, ids, status="done")})
+        for scope in scopes:
+            if scope == MANAGER_SCOPE or notes.project_exists(scope):
+                await hub.send(scope, {"type": "agent", "state": "idle", "summary": reply})
+                await hub.send(scope, {"type": "activity"})
+
+
+manager_session = ManagerSession()
+
+
 class ProjectSession:
     """Queues speech for one project and runs the agents over it one batch at a time."""
 
@@ -101,9 +240,10 @@ class ProjectSession:
     async def _process(self, batch: list[dict]) -> None:
         project, ids = self.project, [s["id"] for s in batch]
         await hub.send(project, {"type": "agent", "state": "working", "segments": ids})
+        STATUS.set(report_status_to(project))
         for attempt in range(3):
             try:
-                sha, summary = await agents.process(
+                sha, summary, manager_requests = await agents.process(
                     project, batch, settings.system_prompt, ui_hooks(project), viewing.get(project)
                 )
                 break
@@ -122,6 +262,9 @@ class ProjectSession:
         await push_instructions(project)
         await hub.send(project, {"type": "agent", "state": "idle", "summary": summary})
         await hub.send(project, {"type": "activity"})
+        # Runs once this project's lock is released, so the manager can safely rename or delete it.
+        for request in manager_requests:
+            manager_session.add_request(request, project)
 
 
 sessions: dict[str, ProjectSession] = {}
@@ -216,7 +359,10 @@ class Recorder:
             if text:
                 segment = transcripts.append(project, text)
                 await hub.send(project, {"type": "segments", "segments": [segment]})
-                session(project).add(segment)
+                if project == MANAGER_SCOPE:
+                    manager_session.add_speech(segment)
+                else:
+                    session(project).add(segment)
 
 
 async def load_whisper() -> None:
@@ -295,43 +441,31 @@ async def list_projects():
 
 @app.post("/api/projects")
 async def create_project(body: NameBody):
-    name = notes.create_project(body.name)
-    await push_projects()
-    return {"name": name}
+    return {"name": await create_project_op(body.name)}
 
 
 @app.post("/api/projects/delete")
 async def delete_projects(body: NamesBody):
-    names = [clean_name(n, "project") for n in body.names]
-    for name in names:
-        await session(name).lock.acquire()
-    try:
-        notes.delete_projects(names)
-        for name in names:
-            transcripts.delete(name)
-            memories.delete(name)
-            activity.delete(name)
-            viewing.pop(name, None)
-    finally:
-        for name in names:
-            session(name).lock.release()
-            sessions.pop(name, None)
-    await push_projects()
+    await delete_projects_op(body.names)
     return {"ok": True}
 
 
 @app.post("/api/projects/rename")
 async def rename_project(body: RenameBody):
-    old = clean_name(body.old, "project")
-    async with session(old).lock:
-        new = notes.rename_project(old, body.new)
-        transcripts.rename(old, new)
-        memories.rename(old, new)
-        activity.rename(old, new)
-    sessions.pop(old, None)
-    viewing.pop(old, None)
-    await push_projects()
-    return {"name": new}
+    return {"name": await rename_project_op(body.old, body.new)}
+
+
+@app.get("/api/manager")
+async def get_manager():
+    """The manager screen: its transcript and its recent replies."""
+    return {
+        "segments": transcripts.all(MANAGER_SCOPE)[-50:],
+        "turns": [
+            {"time": t["time"], "speech": t["speech"], "reply": t["summary"], "actions": t["actions"]}
+            for t in activity.recent(MANAGER_SCOPE, 30)
+        ],
+        "deleted": notes.deleted_projects()[:20],
+    }
 
 
 @app.get("/api/project")
@@ -371,9 +505,10 @@ def keep_section_ids(old_content: str, new_content: str) -> str:
 @app.get("/api/activity")
 async def get_activity(project: str, limit: int = 30):
     """What the agents have been doing: recent turns in full, plus the current context sizes and budgets."""
-    project = clean_name(project, "project")
+    project = project if project == MANAGER_SCOPE else clean_name(project, "project")
     memory = memories.load(project)
-    note_tokens = sum(estimate_tokens(notes.read(project, n)) for n in notes.notes(project))
+    tabs = [] if project == MANAGER_SCOPE else notes.notes(project)
+    note_tokens = sum(estimate_tokens(notes.read(project, n)) for n in tabs)
     return {
         "context": {
             "window": config.LLM_CONTEXT,
@@ -467,11 +602,11 @@ async def websocket(ws: WebSocket):
             data = json.loads(message.get("text") or "{}")
             try:
                 if data.get("type") == "subscribe":
-                    hub.subscribe(ws, clean_name(data["project"], "project") if data.get("project") else None)
+                    hub.subscribe(ws, clean_name(data["project"], "project") if data.get("project") else MANAGER_SCOPE)
                 elif data.get("type") == "view":
                     viewing[clean_name(data["project"], "project")] = data["note"]
                 elif data.get("type") == "start":
-                    recorder.start(clean_name(data["project"], "project"))
+                    recorder.start(clean_name(data["project"], "project") if data.get("project") else MANAGER_SCOPE)
                 elif data.get("type") == "stop":
                     recorder.stop()
             except (NoteError, KeyError) as error:

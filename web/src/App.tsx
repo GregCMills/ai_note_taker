@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
+import { AgentButton } from './components/AgentButton'
 import { AgentInspector } from './components/AgentInspector'
 import { HistoryPanel } from './components/HistoryPanel'
-import { CloseIcon, CollapseIcon, ExpandIcon, HistoryIcon, MenuIcon, MicIcon, MoreIcon, PencilIcon, SparkIcon, StopIcon, TranscriptIcon } from './components/icons'
+import { CloseIcon, CollapseIcon, ExpandIcon, HistoryIcon, MenuIcon, MicIcon, MoreIcon, PencilIcon, StopIcon, TranscriptIcon } from './components/icons'
+import { ManagerView } from './components/ManagerView'
 import { NoteMenu } from './components/NoteMenu'
 import { NoteTabs } from './components/NoteTabs'
 import { NoteView } from './components/NoteView'
@@ -10,7 +12,7 @@ import { ProjectList } from './components/ProjectList'
 import { SettingsDialog } from './components/SettingsDialog'
 import { TranscriptPanel } from './components/TranscriptPanel'
 import { type MicrophoneCapture, startMicrophone } from './microphone'
-import type { AgentState, Commit, Focus, ProjectDetail, ProjectSummary, Segment, ServerEvent, Status } from './types'
+import { type AgentState, type AgentStep, type Commit, type Focus, MANAGER_SCOPE, type ManagerData, type ProjectDetail, type ProjectSummary, type Segment, type ServerEvent, type Status } from './types'
 import { useEditHighlight } from './useEditHighlight'
 import { useFullscreen } from './useFullscreen'
 import { useSocket } from './useSocket'
@@ -49,7 +51,8 @@ const mergeSegments = (existing: Segment[], incoming: Segment[]) => {
   return [...byId.values()].sort((a, b) => a.id - b.id)
 }
 
-const describeAgent = (agent: AgentState) => {
+const describeAgent = (agent: AgentState, inProject: boolean) => {
+  if (agent.state === 'working' && !inProject) return 'Project manager is on it…'
   if (agent.state === 'working') return `Updating notes from ${agent.segments.map((id) => `S${id}`).join(' ')}…`
   if (agent.state === 'error') return agent.message
   return agent.summary ?? ''
@@ -76,6 +79,8 @@ export const App = () => {
   const [menuOpen, setMenuOpen] = useState(false)
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [activityVersion, setActivityVersion] = useState(0)
+  const [agentStep, setAgentStep] = useState<AgentStep | null>(null)
+  const [managerData, setManagerData] = useState<ManagerData | null>(null)
   const [editing, setEditing] = useState(false)
   const [summaryVisible, setSummaryVisible] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -94,7 +99,7 @@ export const App = () => {
       setProjects(event.projects)
       return
     }
-    if (event.project !== undefined && event.project !== currentRef.current) return
+    if (event.project !== undefined && event.project !== (currentRef.current ?? MANAGER_SCOPE)) return
     switch (event.type) {
       case 'note':
         setContents((previous) => ({ ...previous, [event.note]: event.content }))
@@ -128,9 +133,19 @@ export const App = () => {
         break
       case 'agent':
         setAgent(event)
+        if (event.state !== 'working') setAgentStep(null)
+        break
+      case 'agent_step':
+        setAgentStep({ step: event.step, detail: event.detail })
         break
       case 'activity':
         setActivityVersion((version) => version + 1)
+        break
+      case 'open_project':
+        void openProjectRef.current(event.name)
+        break
+      case 'project_closed':
+        goHomeRef.current()
         break
     }
   }, [])
@@ -166,14 +181,44 @@ export const App = () => {
     }
   }, [])
 
+  /** Close the project and talk to the project manager instead. */
+  const goHome = useCallback(() => {
+    setCurrent(null)
+    setTabs([])
+    setContents({})
+    setActiveNote('')
+    setCommits([])
+    setInstructions('')
+    setPartial('')
+    setEditing(false)
+    setView('note')
+    setDrawerOpen(false)
+    setAgent({ state: 'idle' })
+    void api.manager().then((data) => {
+      setManagerData(data)
+      setSegments(data.segments)
+    })
+  }, [])
+
+  const openProjectRef = useRef(openProject)
+  const goHomeRef = useRef(goHome)
+  openProjectRef.current = openProject
+  goHomeRef.current = goHome
+
   useEffect(() => {
     void api.listProjects().then(({ projects: loaded }) => {
       setProjects(loaded)
       const last = readLastProject()
       const initial = loaded.find((p) => p.name === last)?.name ?? loaded[0]?.name
       if (initial) void openProject(initial)
+      else goHome()
     })
-  }, [openProject])
+  }, [openProject, goHome])
+
+  // The manager screen refreshes its conversation whenever the manager finishes a turn.
+  useEffect(() => {
+    if (current === null && activityVersion > 0) void api.manager().then(setManagerData)
+  }, [current, activityVersion])
 
   useEffect(() => {
     send({ type: 'subscribe', project: current })
@@ -227,14 +272,7 @@ export const App = () => {
   const deleteProjects = async (names: string[]) => {
     if (current && names.includes(current)) {
       stopRecording()
-      setCurrent(null)
-      setTabs([])
-      setContents({})
-      setActiveNote('')
-      setSegments([])
-      setCommits([])
-      setInstructions('')
-      setPartial('')
+      goHome()
     }
     await run(() => api.deleteProjects(names))
   }
@@ -249,10 +287,6 @@ export const App = () => {
       buzz()
       if (recording) {
         stopRecording()
-        return
-      }
-      if (!current) {
-        setError('Create or open a project first.')
         return
       }
       micRef.current = await startMicrophone((pcm) => send(pcm))
@@ -295,7 +329,7 @@ export const App = () => {
 
   const allReady = connected && status?.whisper.state === 'ready' && status.llm === 'ready'
   const statusClass = allReady ? 'ok' : status?.whisper.state === 'loading' ? 'wait' : 'bad'
-  const pill = error ?? (agent.state === 'idle' && !summaryVisible ? '' : describeAgent(agent))
+  const pill = error ?? (agent.state === 'idle' && !summaryVisible ? '' : describeAgent(agent, current !== null))
   const toggleView = (next: View) => setView((previous) => (previous === next ? 'note' : next))
   const note = tabs.includes(activeNote) ? activeNote : tabs[0]
 
@@ -306,14 +340,10 @@ export const App = () => {
           <MenuIcon />
         </button>
         <div className="note-title">
-          <h1>{current ?? 'Live Notes'}</h1>
+          <h1>{current ?? 'Projects'}</h1>
         </div>
         <span className={`dot ${statusClass}`} aria-label={allReady ? 'All systems ready' : 'Not ready'} />
-        {current && (
-          <button className="icon-button" onClick={() => setInspectorOpen(true)} aria-label="Agent activity">
-            <SparkIcon size={22} />
-          </button>
-        )}
+        <AgentButton agent={agent} step={agentStep} onClick={() => setInspectorOpen(true)} />
         {fullscreen.supported && (
           <button
             className="icon-button"
@@ -330,6 +360,10 @@ export const App = () => {
 
       <div className="layout">
         <aside className={`drawer ${drawerOpen ? 'open' : ''}`}>
+          <button className={`project-row manager-row ${current === null ? 'active' : ''}`} onClick={goHome}>
+            <span className="project-name">Project manager</span>
+            <span className="project-meta">talk about projects</span>
+          </button>
           <ProjectList
             projects={projects}
             current={current}
@@ -363,12 +397,7 @@ export const App = () => {
               )}
             </>
           ) : (
-            <div className="empty-state">
-              <p>Create a project, then tap the mic and start talking.</p>
-              <button className="button primary" onClick={createProject}>
-                New project
-              </button>
-            </div>
+            <ManagerView projects={projects} data={managerData} live={live} onOpen={openProject} onCreate={createProject} />
           )}
         </main>
 
@@ -430,8 +459,8 @@ export const App = () => {
           onClose={() => setMenuOpen(false)}
         />
       )}
-      {inspectorOpen && current && (
-        <AgentInspector project={current} refreshKey={activityVersion} onClose={() => setInspectorOpen(false)} />
+      {inspectorOpen && (
+        <AgentInspector project={current ?? MANAGER_SCOPE} refreshKey={activityVersion} onClose={() => setInspectorOpen(false)} />
       )}
       {settingsOpen && (
         <SettingsDialog project={current} instructions={instructions} onClose={() => setSettingsOpen(false)} />

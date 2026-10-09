@@ -84,3 +84,23 @@ export const PencilIcon = (props: IconProps) => (
     <path d="M13.5 6.5l4 4" />
   </Svg>
 )
+
+export const BulbIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M9 18h6M10 21h4" />
+    <path d="M12 3a6 6 0 0 0-3.6 10.8c.6.5 1 1.2 1 2V16h5.2v-.2c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z" />
+  </Svg>
+)
+
+export const WrenchIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M14.7 6.3a4 4 0 0 0 5 5L21 12.6a6 6 0 0 1-7.4 1.4l-6.8 6.8a2 2 0 0 1-2.8-2.8l6.8-6.8A6 6 0 0 1 12.2 3.8z" />
+  </Svg>
+)
+
+export const BookIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z" />
+    <path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5" />
+  </Svg>
+)

@@ -1,4 +1,4 @@
-import type { Activity, ProjectDetail, ProjectSummary, Settings, Status } from './types'
+import type { Activity, ManagerData, ProjectDetail, ProjectSummary, Settings, Status } from './types'
 
 const request = async <T>(method: string, url: string, body?: unknown): Promise<T> => {
   const response = await fetch(url, {
@@ -26,6 +26,7 @@ export const api = {
   saveInstructions: (project: string, instructions: string) =>
     request('PUT', '/api/instructions', { project, instructions }),
   activity: (project: string) => request<Activity>('GET', `/api/activity?project=${encodeURIComponent(project)}`),
+  manager: () => request<ManagerData>('GET', '/api/manager'),
   getSettings: () => request<Settings>('GET', '/api/settings'),
   saveSettings: (systemPrompt: string, silenceMs: number) =>
     request<Settings>('PUT', '/api/settings', { system_prompt: systemPrompt, silence_ms: silenceMs }),
