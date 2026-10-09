@@ -11,6 +11,7 @@ import os
 
 os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
+import hashlib
 import json
 import logging
 import re
@@ -42,7 +43,7 @@ from . import config
 from .agentlog import AgentLog, slim_messages
 from .memory import MemoryStore, NoteMemory, SectionInfo
 from .notes import NoteError, NoteStore
-from .sections import Document, Section, estimate_tokens, number_sections, split_at_headings
+from .sections import Collapse, Document, Section, estimate_tokens, number_sections, split_at_headings
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ SCRIBE_RULES = """
 ## How this works
 You keep the notes for one project. A project has one or more notes, which the user sees as tabs. Each message gives you every note (the active one is the tab the user is looking at), the project's recent changes, new speech from the user (transcribed automatically, numbered S1, S2, ...), and the user's saved instructions for this project. Update the notes to reflect the new speech, then reply with one short line saying what you changed. Never repeat the notes in your reply.
 
-Notes are split into sections whose ids are unique across the whole project. In a long project some sections are collapsed to a summary: call open_section before editing one of those.
+Notes are split into sections whose ids are unique across the whole project. In a long project, sections near the top of a note may be shown as a summary, either whole ("collapsed") or just their earlier part ("partly-collapsed", with the end still shown word for word). Call open_section to read the full text before changing summarised text.
 
 - Change notes only with tools: edit_section for small changes, write_section to add, rewrite or delete a whole section, move_section to reorder or move a section into another note, manage_note to create, rename, delete or switch to (open) a note.
 - New sections go in the active note unless the user names another note or the content plainly belongs in an existing one.
@@ -120,9 +121,13 @@ Notes are split into sections whose ids are unique across the whole project. In 
   - Corrections ("no, I meant Tuesday") are ordinary edits.
   - Guidance on how to take notes ("put action items first", "keep it brief"): save it with set_instructions, merged with the existing instructions.
 - The user's saved instructions shape how content is written. They never apply to commands.
-- If the new speech adds nothing (filler, false starts, noise), change nothing and reply "no change".
+- Speech can also be a request to work on what is already in the notes: "update the characters", "reformat the timeline", "tidy chapter one", "fill in the locations from the draft". Do it from the notes' existing content. That is a real request, not "no change".
+- If the speech is only filler, false starts or noise, change nothing and reply "no change".
+- To move text, add it in its new place and remove it from the old one in the same turn; to move a whole section, use move_section. Never delete and recreate a note to change something inside it.
+- Leave no empty or duplicate headings behind.
+- In stories, record what the story says. A word spoken in dialogue is not a character's name unless the story uses it as one.
 - Keep old_text short: just the words being changed, enough to be unique, never the whole section. To add to the end of a section, use its last sentence or line as old_text and repeat it in new_text followed by the addition.
-- Make one edit per section that needs changing, including sections the user's instructions ask you to keep up to date. When a tool replies OK that change is done: do not repeat it. Each reply lists the notes and sections as they are now.
+- Make one edit per section that needs changing, including sections the user's instructions ask you to keep up to date. When a tool replies OK that change is done: go on to the next change or reply, and never send the same call twice. Each reply lists the notes and sections as they are now.
 - Never invent content the user did not say.
 """
 
@@ -204,7 +209,7 @@ class ScribeDeps:
     docs: dict[str, Document]  # in tab order
     active: str
     memory: NoteMemory
-    collapsed: dict[int, str]
+    collapsed: dict[int, Collapse]
     system_prompt: str
     hooks: UiHooks
     actions: list[str] = field(default_factory=list)
@@ -245,7 +250,17 @@ class ScribeDeps:
         return None
 
 
-def render_project(docs: dict[str, Document], active: str, collapsed: dict[int, str]) -> str:
+def drop_empty_twins(doc: Document) -> None:
+    """Remove heading-only sections that repeat another section's heading in the same note (leftovers from
+    edits). A lone empty heading is kept: it is usually a placeholder the user wants."""
+    titles = [s.title.lower() for s in doc.sections]
+    doc.sections = [
+        s for s in doc.sections
+        if s.text[s.body_start():].strip() or titles.count(s.title.lower()) == 1
+    ]
+
+
+def render_project(docs: dict[str, Document], active: str, collapsed: dict[int, Collapse]) -> str:
     return "\n".join(
         f'<note name="{note}"{" active" if note == active else ""}>\n{doc.render(collapsed)}\n</note>'
         for note, doc in docs.items()
@@ -356,43 +371,80 @@ class NoteAgents:
     def _load_project(self, project: str, memory: NoteMemory) -> dict[str, Document]:
         """Every note in tab order, with section ids made unique across the project (and written back)."""
         docs = {note: Document.parse(self.notes.read(project, note), assign=False) for note in self.notes.notes(project)}
+        for doc in docs.values():
+            drop_empty_twins(doc)
         memory.next_section_id = number_sections(list(docs.values()), memory.next_section_id)
         for note, doc in docs.items():
             self.notes.write(project, note, doc.serialize())
         return docs
 
-    async def _collapse(self, docs: dict[str, Document], memory: NoteMemory) -> dict[int, str]:
-        """Collapse the least recently touched sections to summaries until the project fits its budget."""
-        sections = [s for doc in docs.values() for s in doc.sections]
+    async def _collapse(self, docs: dict[str, Document], memory: NoteMemory) -> dict[int, Collapse]:
+        """Fit the project into the note budget by summarising, starting from the top of each note.
+
+        Everything is shown in full until the budget is passed. Then whole sections are summarised from the top
+        of each note down (never a note's last section, nor anything edited in the last couple of turns), and if
+        that is not enough, the earlier part of long sections is summarised while their end, where the user is
+        most likely still working, stays word for word.
+        """
         total = sum(doc.tokens() for doc in docs.values())
         if total <= config.NOTE_TOKEN_BUDGET:
             return {}
         target = int(config.NOTE_TOKEN_BUDGET * 0.75)
-        collapsed: dict[int, str] = {}
-        oldest_first = sorted(sections, key=lambda s: memory.sections.get(s.id, SectionInfo()).touched)
-        for section in oldest_first:
+        collapsed: dict[int, Collapse] = {}
+
+        def recent(section: Section) -> bool:
+            return memory.sections.get(section.id, SectionInfo()).touched >= memory.turn - 1
+
+        # Whole sections, topmost first across all notes.
+        tops = sorted(
+            ((index, section) for doc in docs.values() for index, section in enumerate(doc.sections[:-1])),
+            key=lambda pair: pair[0],
+        )
+        for _, section in tops:
             if total <= target:
-                break
-            if memory.sections.get(section.id, SectionInfo()).touched >= memory.turn - 1:
+                return collapsed
+            if recent(section):
                 continue
-            summary = await self._section_summary(section, memory)
+            summary = await self._section_summary(section, section.text, memory)
             saved = estimate_tokens(section.text) - estimate_tokens(summary) - 25
             if saved > 0:
-                collapsed[section.id] = summary
+                collapsed[section.id] = Collapse(summary)
+                total -= saved
+
+        # Still too big: summarise the earlier part of the longest remaining sections, keeping their end.
+        remaining = sorted(
+            (s for doc in docs.values() for s in doc.sections if s.id not in collapsed),
+            key=lambda s: estimate_tokens(s.text),
+            reverse=True,
+        )
+        for section in remaining:
+            if total <= target:
+                break
+            keep_from = section.tail_start(config.KEEP_TAIL_TOKENS)
+            if keep_from is None:
+                continue
+            head = section.text[section.body_start(): keep_from]
+            summary = await self._section_summary(section, head, memory)
+            saved = estimate_tokens(head) - estimate_tokens(summary) - 30
+            if saved > 0:
+                collapsed[section.id] = Collapse(summary, keep_from)
                 total -= saved
         return collapsed
 
-    async def _section_summary(self, section: Section, memory: NoteMemory) -> str:
+    async def _section_summary(self, section: Section, text: str, memory: NoteMemory) -> str:
+        """A short summary of `text` (all or the earlier part of `section`), cached until that text changes."""
         info = memory.sections.setdefault(section.id, SectionInfo())
-        if info.digest != section.digest or not info.summary:
+        digest = hashlib.sha1(text.encode()).hexdigest()[:12]
+        if info.digest != digest or not info.summary:
             started = time.monotonic()
             await report("context", f"summarising §{section.id}")
             result = await self.librarian.run(
-                "Summarise this note section in at most two sentences, so an assistant knows what it "
-                f"contains and when it would need to open it:\n\n{section.text}"
+                "Summarise this note text in at most three sentences, so an assistant knows what it contains "
+                "(names, events, decisions) and when it would need to read it in full:\n\n"
+                f"{text}"
             )
             record_subrun("librarian", f"summarise §{section.id}", result, started)
-            info.summary, info.digest = result.output.strip(), section.digest
+            info.summary, info.digest = result.output.strip(), digest
         return info.summary
 
     async def _compact_history(self, memory: NoteMemory) -> None:
@@ -445,11 +497,14 @@ class NoteAgents:
             deps = ctx.deps
             if refused := deps.repeated("edit", section_id, old_text, new_text):
                 return refused
+            if old_text == new_text:
+                return deps.fail("new_text is the same as old_text, so that edit changes nothing")
             found = deps.find(section_id)
             if found is None:
                 return deps.fail(f"no section {section_id}")
             note, section = found
-            if section_id in deps.collapsed:
+            fold = deps.collapsed.get(section_id)
+            if fold is not None and fold.keep_from is None:
                 return deps.fail(f"section {section_id} is collapsed; call open_section({section_id}) first")
             count = section.text.count(old_text) if old_text else 0
             if count > 1 and old_text.strip() and section.text.rstrip().endswith(old_text.strip()):
@@ -496,12 +551,19 @@ class NoteAgents:
                     deps.collapsed.pop(section_id, None)
                     await self._save(deps, [target], target, f"delete §{section_id}", [])
                     return f"OK, deleted. {deps.outline()}"
+                if section_id in deps.collapsed:
+                    return deps.fail(
+                        f"section {section_id} is shown summarised, so rewriting it whole would lose text you have "
+                        f"not seen. Use edit_section, or call open_section({section_id}) first"
+                    )
                 old_words, new_words = len(section.text.split()), len(content.split())
                 if old_words >= SHRINK_GUARD_WORDS and new_words < old_words / 2:
                     return deps.fail(
                         f"that would cut section {section_id} from {old_words} words to {new_words}. To change part of "
                         "a section use edit_section; to delete it, write empty content"
                     )
+                if content.strip() == section.text.strip():
+                    return deps.fail(f"section {section_id} already has exactly that text, so the rewrite changes nothing")
                 section.text = content
                 deps.collapsed.pop(section_id, None)
                 await self._save(deps, [target], target, f"rewrite §{section_id}", [section_id])

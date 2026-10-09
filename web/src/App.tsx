@@ -3,7 +3,7 @@ import { api } from './api'
 import { AgentButton } from './components/AgentButton'
 import { AgentInspector } from './components/AgentInspector'
 import { HistoryPanel } from './components/HistoryPanel'
-import { CloseIcon, CollapseIcon, ExpandIcon, HistoryIcon, MenuIcon, MicIcon, MoreIcon, PencilIcon, StopIcon, TranscriptIcon } from './components/icons'
+import { CloseIcon, CollapseIcon, ExpandIcon, HistoryIcon, MenuIcon, MicIcon, MoreIcon, StopIcon, TranscriptIcon } from './components/icons'
 import { ManagerView } from './components/ManagerView'
 import { NoteMenu } from './components/NoteMenu'
 import { NoteTabs } from './components/NoteTabs'
@@ -81,6 +81,8 @@ export const App = () => {
   const [activityVersion, setActivityVersion] = useState(0)
   const [agentStep, setAgentStep] = useState<AgentStep | null>(null)
   const [managerData, setManagerData] = useState<ManagerData | null>(null)
+  const [barHidden, setBarHidden] = useState(false)
+  const lastScroll = useRef(0)
   const [editing, setEditing] = useState(false)
   const [summaryVisible, setSummaryVisible] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -330,11 +332,20 @@ export const App = () => {
   const allReady = connected && status?.whisper.state === 'ready' && status.llm === 'ready'
   const statusClass = allReady ? 'ok' : status?.whisper.state === 'loading' ? 'wait' : 'bad'
   const pill = error ?? (agent.state === 'idle' && !summaryVisible ? '' : describeAgent(agent, current !== null))
+  // The bottom bar slides away while scrolling down to read and comes back on scrolling up (never while recording).
+  const hideBarWhileReading = (event: React.UIEvent<HTMLElement>) => {
+    const y = event.currentTarget.scrollTop
+    const delta = y - lastScroll.current
+    lastScroll.current = y
+    if (y < 40 || delta < -6) setBarHidden(false)
+    else if (delta > 6) setBarHidden(true)
+  }
+
   const toggleView = (next: View) => setView((previous) => (previous === next ? 'note' : next))
   const note = tabs.includes(activeNote) ? activeNote : tabs[0]
 
   return (
-    <div className="app" data-view={view}>
+    <div className={`app ${barHidden && !recording ? 'bar-hidden' : ''}`} data-view={view}>
       <header className="top-bar">
         <button className="icon-button menu-button" onClick={() => setDrawerOpen(true)} aria-label="All projects">
           <MenuIcon />
@@ -374,10 +385,15 @@ export const App = () => {
         </aside>
         {drawerOpen && <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} />}
 
-        <main className="pane pane-note">
+        <main className="pane pane-note" onScroll={hideBarWhileReading}>
           {current && note ? (
             <>
-              <NoteTabs notes={tabs} active={note} onSelect={setActiveNote} />
+              <NoteTabs
+                notes={tabs}
+                active={note}
+                onSelect={setActiveNote}
+                onEdit={editing ? undefined : () => setEditing(true)}
+              />
               <NoteView
                 key={`${current}/${note}`}
                 content={contents[note] ?? ''}
@@ -389,12 +405,6 @@ export const App = () => {
                 onSave={(next) => run(() => api.saveNote(current, note, next))}
                 onCloseEditor={() => setEditing(false)}
               />
-              {!editing && (
-                <button className="edit-fab" onClick={() => setEditing(true)} aria-label="Edit this note">
-                  <PencilIcon size={20} />
-                  <span>Edit</span>
-                </button>
-              )}
             </>
           ) : (
             <ManagerView projects={projects} data={managerData} live={live} onOpen={openProject} onCreate={createProject} />
@@ -422,14 +432,14 @@ export const App = () => {
             <HistoryPanel commits={commits} onRevert={revert} onRestore={restore} />
           </section>
         </aside>
-      </div>
-
-      <footer className="mic-bar">
         {pill && (
           <button className={`agent-pill ${error ? 'error' : agent.state}`} onClick={() => setError(null)}>
             {pill}
           </button>
         )}
+      </div>
+
+      <footer className="mic-bar">
         <button className={`bar-button ${view === 'history' ? 'active' : ''}`} onClick={() => toggleView('history')}>
           <HistoryIcon />
           <span>History</span>
@@ -439,7 +449,7 @@ export const App = () => {
           onClick={toggleRecording}
           aria-label={recording ? 'Stop recording' : 'Start recording'}
         >
-          {recording ? <StopIcon size={30} /> : <MicIcon size={30} />}
+          {recording ? <StopIcon size={26} /> : <MicIcon size={26} />}
         </button>
         <button className={`bar-button ${view === 'transcript' ? 'active' : ''}`} onClick={() => toggleView('transcript')}>
           <TranscriptIcon />

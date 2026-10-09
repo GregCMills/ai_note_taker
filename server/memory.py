@@ -8,6 +8,15 @@ from pathlib import Path
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 
 
+def is_no_change(turn: list[ModelMessage]) -> bool:
+    """A turn that made no tool calls and ended with the reply "no change"."""
+    parts = [part for message in turn for part in message.parts]
+    if any(getattr(part, "part_kind", "") == "tool-call" for part in parts):
+        return False
+    texts = [part.content for part in parts if getattr(part, "part_kind", "") == "text"]
+    return bool(texts) and texts[-1].strip().lower().rstrip(".") == "no change"
+
+
 @dataclass
 class SectionInfo:
     digest: str = ""
@@ -26,7 +35,9 @@ class NoteMemory:
     active_note: str = ""
 
     def history(self) -> list[ModelMessage]:
-        return [message for turn in self.turns for message in turn]
+        """The conversation the scribe sees. Turns where it changed nothing are left out: they are mostly filler
+        ("um", false starts), and keeping them teaches the model to answer "no change" to similar requests."""
+        return [message for turn in self.turns if not is_no_change(turn) for message in turn]
 
     def touch(self, section_id: int) -> None:
         self.sections.setdefault(section_id, SectionInfo()).touched = self.turn

@@ -33,6 +33,8 @@ TLS_HOSTS = [h.strip() for h in _env("TLS_HOSTS", "").split(",") if h.strip()]
 # Context budgets for the scribe (approximate tokens). Older sections collapse to summaries past the
 # note budget; older conversation turns are summarised past the history budget.
 NOTE_TOKEN_BUDGET = int(_env("NOTE_TOKEN_BUDGET", "20000"))
+# When a long section has to be summarised, this much of its end stays word for word.
+KEEP_TAIL_TOKENS = int(_env("KEEP_TAIL_TOKENS", "1500"))
 HISTORY_TOKEN_BUDGET = int(_env("HISTORY_TOKEN_BUDGET", "10000"))
 KEEP_RECENT_TURNS = int(_env("KEEP_RECENT_TURNS", "15"))
 # How many recent commits the scribe sees each turn, so it knows what ask_history can undo.
