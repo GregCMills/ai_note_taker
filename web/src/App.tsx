@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { AgentButton } from './components/AgentButton'
 import { AgentInspector } from './components/AgentInspector'
@@ -88,6 +88,9 @@ export const App = () => {
   const [managerData, setManagerData] = useState<ManagerData | null>(null)
   const [barHidden, setBarHidden] = useState(false)
   const barScroll = useRef({ last: 0, travel: 0, settleUntil: 0, hidden: false })
+  // Where you were in each note, so switching tabs (including the agent switching back) keeps your place.
+  const notePane = useRef<HTMLElement>(null)
+  const scrollPositions = useRef(new Map<string, number>())
   const [editing, setEditing] = useState(false)
   const [summaryVisible, setSummaryVisible] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -343,6 +346,7 @@ export const App = () => {
   // ignored and only a deliberate scroll in one direction counts. Otherwise the bar flickers up and down.
   const hideBarWhileReading = (event: React.UIEvent<HTMLElement>) => {
     const pane = event.currentTarget
+    if (current && note && !editing) scrollPositions.current.set(`${current}/${note}`, pane.scrollTop)
     const state = barScroll.current
     const delta = pane.scrollTop - state.last
     state.last = pane.scrollTop
@@ -367,6 +371,12 @@ export const App = () => {
 
   const toggleView = (next: View) => setView((previous) => (previous === next ? 'note' : next))
   const note = tabs.includes(activeNote) ? activeNote : tabs[0]
+
+  // Back on a note you were reading: return to where you were in it.
+  useLayoutEffect(() => {
+    if (!notePane.current || !current || !note) return
+    notePane.current.scrollTop = scrollPositions.current.get(`${current}/${note}`) ?? 0
+  }, [current, note])
 
   return (
     <div className={`app ${barHidden && !recording ? 'bar-hidden' : ''}`} data-view={view}>
@@ -400,7 +410,7 @@ export const App = () => {
         </aside>
         {drawerOpen && <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} />}
 
-        <main className="pane pane-note" onScroll={hideBarWhileReading}>
+        <main className="pane pane-note" ref={notePane} onScroll={hideBarWhileReading}>
           {current && note ? (
             <>
               <NoteTabs notes={tabs} active={note} onSelect={setActiveNote} />

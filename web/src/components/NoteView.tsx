@@ -24,17 +24,19 @@ type NoteViewProps = {
 
 const NEAR_BOTTOM_PX = 160
 
-/** The changed lines in a section (or the section's heading if nothing is highlighted), to scroll to. */
-const editTarget = (article: HTMLElement, section: number): Element | null => {
+/** Where an edit landed: the last highlighted change in the section, or null if nothing there is highlighted. */
+const changedTarget = (article: HTMLElement, section: number): Element | null => {
   const anchor = article.querySelector(`[data-section="${section}"]`)
-  if (!anchor) return null
   let target: Element | null = null
-  for (let node = anchor.nextElementSibling; node && !node.matches('.section-anchor'); node = node.nextElementSibling) {
+  for (let node = anchor?.nextElementSibling; node && !node.matches('.section-anchor'); node = node.nextElementSibling) {
     const changed = node.matches('.changed') ? node : node.querySelector('.changed:last-of-type')
     if (changed) target = changed
   }
-  return target ?? anchor.nextElementSibling
+  return target
 }
+
+const sectionStart = (article: HTMLElement, section: number): Element | null =>
+  article.querySelector(`[data-section="${section}"]`)?.nextElementSibling ?? null
 
 const LiveTranscript = ({ segments, workingIds, partial }: LiveSpeech) => {
   if (segments.length === 0 && !partial) return null
@@ -140,11 +142,17 @@ export const NoteView = ({ content, baseline, fading, live, editing, focus, onSa
     if (distance < NEAR_BOTTOM_PX + end.offsetHeight) end.scrollIntoView({ block: 'end', behavior: 'smooth' })
   }, [liveLength])
 
-  // Follow the agent: bring whatever it is editing into view, again each time the note updates.
+  // Follow the agent: bring its latest change into view (an addition at the end scrolls to the end). Later
+  // re-renders only scroll if there is a highlighted change to show, never when the highlight just fades, which
+  // used to jump back to the top of the section.
+  const followedFocus = useRef(0)
   useEffect(() => {
     const article = articleRef.current
     if (!article || !focus || focus.section === null) return
-    editTarget(article, focus.section)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    const changed = changedTarget(article, focus.section)
+    const target = changed ?? (followedFocus.current === focus.seq ? null : sectionStart(article, focus.section))
+    followedFocus.current = focus.seq
+    target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, [focus, html])
 
   if (editing) return <Editor content={content} onSave={onSave} onCancel={onCloseEditor} />
