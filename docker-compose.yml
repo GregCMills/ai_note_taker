@@ -1,0 +1,124 @@
+# One command: `docker compose up -d`, then open https://<this-machine's-LAN-IP>:8443
+services:
+  llm:
+    image: local/llama-cpp-turboquant:server-cuda
+    container_name: notetaker-llm
+    tty: true
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    command:
+      - -hf
+      - unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_XL
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --api-key
+      - ${LLM_API_KEY:-test}
+      - --jinja
+      - -c
+      - "40960"
+      - --parallel
+      - "1"
+      - -ngl
+      - "-1"
+      - -sm
+      - layer
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      - --flash-attn
+      - "on"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - turbo3
+      - --reasoning
+      - "off"
+      - --temp
+      - "0.2"
+      - --top-p
+      - "0.95"
+      - --top-k
+      - "64"
+      - -fit
+      - "off"
+      - --repeat-penalty
+      - "1.05"
+      - --repeat-last-n
+      - "256"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # Builds the React frontend into web/dist, then exits.
+  web:
+    image: node:20-alpine
+    container_name: notetaker-web
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /web
+    volumes:
+      - ./web:/web
+    command: sh -c "npm install --no-audit --no-fund && npm run build"
+
+  # Pre-built PyTorch image: already has CUDA 12.6 + cuDNN 9 for Whisper. The code is mounted, not copied,
+  # and Python packages live in a persistent venv, so restarts skip installs and code changes need no rebuild.
+  app:
+    image: pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime
+    container_name: notetaker-app
+    depends_on:
+      llm:
+        condition: service_started
+      web:
+        condition: service_completed_successfully
+    working_dir: /app
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./server:/app/server
+      - ./web/dist:/app/web/dist
+      - ./data:/data
+      - notetaker-venv:/venv
+      - ${HOME}/.cache/huggingface:/hf
+    environment:
+      APP_UID: ${UID:-1000}
+      APP_GID: ${GID:-1000}
+      DATA_DIR: /data
+      HF_HOME: /hf
+      HOME: /tmp
+      PYTHONUNBUFFERED: "1"
+      LD_LIBRARY_PATH: /opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib
+      LLM_URL: http://llm:8080/v1
+      LLM_API_KEY: ${LLM_API_KEY:-test}
+      WHISPER_MODEL: large-v3-turbo
+      WHISPER_LANGUAGE: en
+      # Add this machine's LAN IP / hostname so they appear in the self-signed certificate.
+      TLS_HOSTS: ${TLS_HOSTS:-}
+    # Installs git and Python packages on first start (fast no-ops after), then runs the server
+    # as your user so files in ./data stay yours.
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends git >/dev/null; }
+        [ -x /venv/bin/python ] || python -m venv --system-site-packages /venv
+        /venv/bin/pip install -q --disable-pip-version-check -r server/requirements.txt
+        exec setpriv --reuid=$$APP_UID --regid=$$APP_GID --clear-groups /venv/bin/python -m server.main
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  notetaker-venv:

@@ -1,0 +1,58 @@
+services:
+  llama-server:
+    container_name: fast-gemma-26B-red
+    image: local/llama-cpp-turboquant:server-cuda
+    tty: true
+    ports:
+      - "8081:8080"
+    volumes:
+      - /home/greg/.cache/huggingface:/root/.cache/huggingface
+    command:
+      - -hf
+      - unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_XL
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --api-key
+      - "test"
+      - -c
+      - "15000"
+      - --parallel
+      - "1"
+      - -ngl
+      - "-1"
+      - -sm
+      - layer
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      - --flash-attn
+      - "on"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - turbo3
+      - --reasoning
+      - off
+      - --temp
+      - "0.2"
+      - --top-p
+      - "0.95"
+      - --top-k
+      - "64"
+      - -fit
+      - off
+      - --repeat-penalty
+      - "1.05"
+      - --repeat-last-n
+      - "256"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
+    restart: "no"
