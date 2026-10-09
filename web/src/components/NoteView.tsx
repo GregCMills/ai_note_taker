@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { markAppScroll } from '../appScroll'
 import { renderNote } from '../highlight'
 
 // The rendered editor is large, so it is only downloaded the first time a note is edited.
@@ -139,7 +140,10 @@ export const NoteView = ({ content, baseline, fading, live, editing, focus, onSa
     const scroller = end?.closest('.pane-note')
     if (!end || !scroller) return
     const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight
-    if (distance < NEAR_BOTTOM_PX + end.offsetHeight) end.scrollIntoView({ block: 'end', behavior: 'smooth' })
+    if (distance < NEAR_BOTTOM_PX + end.offsetHeight) {
+      markAppScroll()
+      end.scrollIntoView({ block: 'end', behavior: 'smooth' })
+    }
   }, [liveLength])
 
   // Follow the agent: bring its latest change into view (an addition at the end scrolls to the end). Later
@@ -152,7 +156,9 @@ export const NoteView = ({ content, baseline, fading, live, editing, focus, onSa
     const changed = changedTarget(article, focus.section)
     const target = changed ?? (followedFocus.current === focus.seq ? null : sectionStart(article, focus.section))
     followedFocus.current = focus.seq
-    target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    if (!target) return
+    markAppScroll()
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }, [focus, html])
 
   if (editing) return <Editor content={content} onSave={onSave} onCancel={onCloseEditor} />

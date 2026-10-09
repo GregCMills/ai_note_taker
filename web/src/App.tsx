@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
+import { isAppScroll, markAppScroll } from './appScroll'
 import { AgentButton } from './components/AgentButton'
 import { AgentInspector } from './components/AgentInspector'
 import { HistoryPanel } from './components/HistoryPanel'
@@ -88,6 +89,7 @@ export const App = () => {
   const [managerData, setManagerData] = useState<ManagerData | null>(null)
   const [barHidden, setBarHidden] = useState(false)
   const barScroll = useRef({ last: 0, travel: 0, settleUntil: 0, hidden: false })
+  const agentWorking = useRef(false)
   // Where you were in each note, so switching tabs (including the agent switching back) keeps your place.
   const notePane = useRef<HTMLElement>(null)
   const scrollPositions = useRef(new Map<string, number>())
@@ -350,6 +352,11 @@ export const App = () => {
     const state = barScroll.current
     const delta = pane.scrollTop - state.last
     state.last = pane.scrollTop
+    // Only the user's own scrolling moves the bar: not the app following an edit, and not while the agent works.
+    if (isAppScroll() || agentWorking.current) {
+      state.travel = 0
+      return
+    }
     const now = performance.now()
     if (now < state.settleUntil) return
     const setHidden = (hidden: boolean) => {
@@ -371,10 +378,12 @@ export const App = () => {
 
   const toggleView = (next: View) => setView((previous) => (previous === next ? 'note' : next))
   const note = tabs.includes(activeNote) ? activeNote : tabs[0]
+  agentWorking.current = agent.state === 'working'
 
   // Back on a note you were reading: return to where you were in it.
   useLayoutEffect(() => {
     if (!notePane.current || !current || !note) return
+    markAppScroll()
     notePane.current.scrollTop = scrollPositions.current.get(`${current}/${note}`) ?? 0
   }, [current, note])
 
