@@ -150,7 +150,7 @@ export const NoteView = ({ content, baseline, fading, live, editing, focus, onSa
   useEffect(() => {
     const article = articleRef.current
     if (!article || !focus || focus.section === null) return
-    const changed = changedTarget(article, focus.section)
+    const changed = changedTarget(article, focus.section) ?? article.querySelector('.edit-point')
     const target = changed ?? (followedFocus.current === focus.seq ? null : sectionStart(article, focus.section))
     followedFocus.current = focus.seq
     if (target) scrollWithin(target, 'center')

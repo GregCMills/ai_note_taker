@@ -23,7 +23,7 @@ type View = 'note' | 'transcript' | 'history'
 
 const STATUS_POLL_MS = 10000
 const SUMMARY_VISIBLE_MS = 4000
-const ERROR_VISIBLE_MS = 10000
+const ERROR_VISIBLE_MS = 4000
 // Bottom bar folding while reading: how far to scroll before it moves, how long to ignore scrolls after it has
 // moved, and how much scrollable room a note needs before folding is worth it.
 const BAR_TOGGLE_PX = 50
