@@ -1,5 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { renderNote } from '../highlight'
+
+// The rendered editor is large, so it is only downloaded the first time a note is edited.
+const RichEditor = lazy(() => import('./RichEditor').then((module) => ({ default: module.RichEditor })))
 import type { Focus, Segment } from '../types'
 
 type LiveSpeech = {
@@ -59,6 +62,9 @@ const Editor = ({ content, onSave, onCancel }: EditorProps) => {
   const [opened, setOpened] = useState(() => editable(content))
   const [draft, setDraft] = useState(opened)
   const [saving, setSaving] = useState(false)
+  const [source, setSource] = useState(false)
+  // Bumped to reload the rich editor with `draft` (it keeps its own state while mounted).
+  const [loads, setLoads] = useState(0)
   const changedMeanwhile = editable(content) !== opened
 
   const save = async () => {
@@ -71,6 +77,12 @@ const Editor = ({ content, onSave, onCancel }: EditorProps) => {
   const takeLatest = () => {
     setOpened(editable(content))
     setDraft(editable(content))
+    setLoads((count) => count + 1)
+  }
+
+  const toggleSource = () => {
+    if (source) setLoads((count) => count + 1)
+    setSource(!source)
   }
 
   return (
@@ -79,7 +91,9 @@ const Editor = ({ content, onSave, onCancel }: EditorProps) => {
         <button className="button" onClick={onCancel}>
           Cancel
         </button>
-        <span className="editor-hint">Editing</span>
+        <button className={`button small ${source ? 'primary' : ''}`} onClick={toggleSource} aria-pressed={source}>
+          Source
+        </button>
         <button className="button primary" disabled={saving} onClick={save}>
           Save
         </button>
@@ -92,13 +106,21 @@ const Editor = ({ content, onSave, onCancel }: EditorProps) => {
           </button>
         </div>
       )}
-      <textarea
-        className="editor"
-        value={draft}
-        placeholder="Type or paste into this note…"
-        autoFocus
-        onChange={(event) => setDraft(event.target.value)}
-      />
+      {source ? (
+        <textarea
+          className="editor"
+          value={draft}
+          placeholder="Type or paste into this note…"
+          autoFocus
+          onChange={(event) => setDraft(event.target.value)}
+        />
+      ) : (
+        <div className="rich-editor-scroll">
+          <Suspense fallback={<p className="hint editor-loading">Loading editor…</p>}>
+            <RichEditor key={loads} initial={draft} onChange={setDraft} />
+          </Suspense>
+        </div>
+      )}
     </div>
   )
 }

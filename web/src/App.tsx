@@ -3,7 +3,7 @@ import { api } from './api'
 import { AgentButton } from './components/AgentButton'
 import { AgentInspector } from './components/AgentInspector'
 import { HistoryPanel } from './components/HistoryPanel'
-import { CloseIcon, CollapseIcon, ExpandIcon, HistoryIcon, MenuIcon, MicIcon, MoreIcon, StopIcon, TranscriptIcon } from './components/icons'
+import { CloseIcon, CollapseIcon, ExpandIcon, HistoryIcon, MenuIcon, MicIcon, MoreIcon, PencilIcon, StopIcon, TranscriptIcon } from './components/icons'
 import { ManagerView } from './components/ManagerView'
 import { NoteMenu } from './components/NoteMenu'
 import { NoteTabs } from './components/NoteTabs'
@@ -412,12 +412,7 @@ export const App = () => {
         <main className="pane pane-note" onScroll={hideBarWhileReading}>
           {current && note ? (
             <>
-              <NoteTabs
-                notes={tabs}
-                active={note}
-                onSelect={setActiveNote}
-                onEdit={editing ? undefined : () => setEditing(true)}
-              />
+              <NoteTabs notes={tabs} active={note} onSelect={setActiveNote} />
               <NoteView
                 key={`${current}/${note}`}
                 content={contents[note] ?? ''}
@@ -475,10 +470,25 @@ export const App = () => {
         >
           {recording ? <StopIcon size={26} /> : <MicIcon size={26} />}
         </button>
-        <button className={`bar-button ${view === 'transcript' ? 'active' : ''}`} onClick={() => toggleView('transcript')}>
-          <TranscriptIcon />
-          <span>Transcript</span>
-        </button>
+        <div className="bar-group">
+          <button className={`bar-button ${view === 'transcript' ? 'active' : ''}`} onClick={() => toggleView('transcript')}>
+            <TranscriptIcon />
+            <span>Transcript</span>
+          </button>
+          {current && (
+            <button
+              className={`bar-button ${editing ? 'active' : ''}`}
+              onClick={() => {
+                setView('note')
+                setEditing(true)
+              }}
+              disabled={editing}
+            >
+              <PencilIcon />
+              <span>Edit</span>
+            </button>
+          )}
+        </div>
       </footer>
 
       {menuOpen && (

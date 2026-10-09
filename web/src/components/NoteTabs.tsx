@@ -1,14 +1,12 @@
 import { useEffect, useRef } from 'react'
-import { PencilIcon } from './icons'
 
 type NoteTabsProps = {
   notes: string[]
   active: string
   onSelect: (note: string) => void
-  onEdit?: () => void
 }
 
-export const NoteTabs = ({ notes, active, onSelect, onEdit }: NoteTabsProps) => {
+export const NoteTabs = ({ notes, active, onSelect }: NoteTabsProps) => {
   const barRef = useRef<HTMLDivElement>(null)
 
   // Keep the active tab visible when the agent switches to one that is scrolled out of view.
@@ -31,11 +29,6 @@ export const NoteTabs = ({ notes, active, onSelect, onEdit }: NoteTabsProps) => 
           </button>
         ))}
       </div>
-      {onEdit && (
-        <button className="icon-button tabs-edit" onClick={onEdit} aria-label="Edit this note">
-          <PencilIcon size={20} />
-        </button>
-      )}
     </div>
   )
 }

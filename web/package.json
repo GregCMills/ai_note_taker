@@ -8,6 +8,7 @@
     "build": "tsc -p . && vite build"
   },
   "dependencies": {
+    "@milkdown/kit": "^7.22.2",
     "dompurify": "^3.4.16",
     "marked": "^18.1.0",
     "react": "^19.3.0",

@@ -51,6 +51,7 @@ MAX_TOOL_FAILURES = 3
 # Rewriting a section at least this long down to under half its size is refused: it is almost always the model
 # sending only the changed sentence, which would silently delete the rest.
 SHRINK_GUARD_WORDS = 80
+EDIT_SHRINK_GUARD_WORDS = 40
 
 
 class StopTurn(Exception):
@@ -502,6 +503,16 @@ class NoteAgents:
                 return refused
             if old_text == new_text:
                 return deps.fail("new_text is the same as old_text, so that edit changes nothing")
+            # Replacing a long passage with a short one is almost always the model sending only the new sentence,
+            # which would silently delete the rest (it once wiped a whole story this way). Deleting on purpose,
+            # with an empty new_text, is still allowed.
+            old_words, new_words = len(old_text.split()), len(new_text.split())
+            if old_words >= EDIT_SHRINK_GUARD_WORDS and 0 < new_words < old_words / 2:
+                return deps.fail(
+                    f"that would replace {old_words} words with {new_words}, deleting most of them. To add text, "
+                    "use a short old_text (e.g. the last sentence) and put it back in new_text followed by the "
+                    "addition. To delete text on purpose, use an empty new_text"
+                )
             found = deps.find(section_id)
             if found is None:
                 return deps.fail(f"no section {section_id}")

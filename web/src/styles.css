@@ -400,7 +400,8 @@ html:fullscreen {
   text-align: center;
 }
 
-.editor {
+/* textarea only: the rendered editor's own element is also called "editor" by Milkdown. */
+textarea.editor {
   flex: 1;
   width: 100%;
   padding: 14px 18px;
@@ -463,6 +464,20 @@ html:fullscreen {
 .bar-button svg {
   width: 22px;
   height: 22px;
+}
+
+.bar-group {
+  display: flex;
+  justify-content: space-evenly;
+  justify-self: stretch;
+}
+
+.bar-group .bar-button {
+  min-width: 60px;
+}
+
+.bar-button:disabled {
+  opacity: 1;
 }
 
 .bar-button.active {
@@ -937,9 +952,52 @@ html:fullscreen {
   scrollbar-width: none;
 }
 
-.tabs-edit {
-  flex-shrink: 0;
-  color: var(--muted);
+/* ---- rich (rendered) editor --------------------------------------------------------------- */
+
+.rich-editor-scroll {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.rich-editor {
+  max-width: 760px;
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 8px 18px 40vh;
+}
+
+.rich-editor .ProseMirror {
+  min-height: 60vh;
+  outline: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  caret-color: var(--accent);
+  /* 16px or more stops iOS zooming in on focus. */
+  font-size: max(16px, 1em);
+}
+
+.rich-editor .ProseMirror li > p {
+  margin: 0;
+}
+
+.rich-editor .ProseMirror li[data-item-type='task'] {
+  position: relative;
+  list-style: none;
+}
+
+.rich-editor .ProseMirror li[data-item-type='task']::before {
+  content: '☐';
+  position: absolute;
+  left: -1.3em;
+}
+
+.rich-editor .ProseMirror li[data-item-type='task'][data-checked='true']::before {
+  content: '☑';
+}
+
+.rich-editor .ProseMirror .ProseMirror-selectednode {
+  outline: 2px solid var(--accent);
 }
 
 .note-tabs::-webkit-scrollbar {
