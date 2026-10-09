@@ -1,61 +1,137 @@
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { renderNote } from '../highlight'
+import type { Focus, Segment } from '../types'
 
-type NoteViewProps = {
-  path: string
-  content: string
-  onSave: (content: string) => Promise<void>
-  onRename: () => void
-  onDelete: () => void
+type LiveSpeech = {
+  segments: Segment[]
+  workingIds: number[]
+  partial: string
 }
 
-export const NoteView = ({ path, content, onSave, onRename, onDelete }: NoteViewProps) => {
-  const [draft, setDraft] = useState<string | null>(null)
-  const html = useMemo(() => DOMPurify.sanitize(marked.parse(content, { async: false })), [content])
+type NoteViewProps = {
+  content: string
+  baseline: string | null
+  fading: boolean
+  live: LiveSpeech
+  editing: boolean
+  focus: Focus | null
+  onSave: (content: string) => Promise<void>
+  onCloseEditor: () => void
+}
+
+const NEAR_BOTTOM_PX = 160
+
+/** The changed lines in a section (or the section's heading if nothing is highlighted), to scroll to. */
+const editTarget = (article: HTMLElement, section: number): Element | null => {
+  const anchor = article.querySelector(`[data-section="${section}"]`)
+  if (!anchor) return null
+  let target: Element | null = null
+  for (let node = anchor.nextElementSibling; node && !node.matches('.section-anchor'); node = node.nextElementSibling) {
+    const changed = node.matches('.changed') ? node : node.querySelector('.changed:last-of-type')
+    if (changed) target = changed
+  }
+  return target ?? anchor.nextElementSibling
+}
+
+const LiveTranscript = ({ segments, workingIds, partial }: LiveSpeech) => {
+  if (segments.length === 0 && !partial) return null
+  return (
+    <div className="live-transcript" aria-live="polite">
+      {segments.map((segment) => (
+        <span key={segment.id} className={workingIds.includes(segment.id) ? 'live-working' : 'live-pending'}>
+          {segment.text}{' '}
+        </span>
+      ))}
+      {partial && <span className="live-partial">{partial}</span>}
+      <span className="live-cursor" />
+    </div>
+  )
+}
+
+const SECTION_MARKER = /^<!-- §\d+ -->[ \t]*\n?/gm
+
+/** The note as the user should edit it: without the hidden section markers (the server re-attaches them). */
+const editable = (content: string) => content.replace(SECTION_MARKER, '')
+
+type EditorProps = { content: string; onSave: (content: string) => Promise<void>; onCancel: () => void }
+
+const Editor = ({ content, onSave, onCancel }: EditorProps) => {
+  const [opened, setOpened] = useState(() => editable(content))
+  const [draft, setDraft] = useState(opened)
+  const [saving, setSaving] = useState(false)
+  const changedMeanwhile = editable(content) !== opened
 
   const save = async () => {
-    if (draft === null) return
+    setSaving(true)
     await onSave(draft)
-    setDraft(null)
+    setSaving(false)
+    onCancel()
+  }
+
+  const takeLatest = () => {
+    setOpened(editable(content))
+    setDraft(editable(content))
   }
 
   return (
-    <section className="note-view">
-      <div className="panel-header">
-        <span className="note-path" title={path}>
-          {path}
-        </span>
-        <div className="actions">
-          {draft === null ? (
-            <>
-              <button className="button small" onClick={() => setDraft(content)}>
-                Edit
-              </button>
-              <button className="button small" onClick={onRename}>
-                Rename
-              </button>
-              <button className="button small danger" onClick={onDelete}>
-                Delete
-              </button>
-            </>
-          ) : (
-            <>
-              <button className="button small primary" onClick={save}>
-                Save
-              </button>
-              <button className="button small" onClick={() => setDraft(null)}>
-                Cancel
-              </button>
-            </>
-          )}
-        </div>
+    <div className="editor-view">
+      <div className="editor-bar">
+        <button className="button" onClick={onCancel}>
+          Cancel
+        </button>
+        <span className="editor-hint">Editing</span>
+        <button className="button primary" disabled={saving} onClick={save}>
+          Save
+        </button>
       </div>
-      {draft === null ? (
-        <article className="markdown" dangerouslySetInnerHTML={{ __html: html }} />
-      ) : (
-        <textarea className="editor" value={draft} onChange={(event) => setDraft(event.target.value)} />
+      {changedMeanwhile && (
+        <div className="editor-warning">
+          The agent changed this note while you were editing. Saving will replace its changes.
+          <button className="button small" onClick={takeLatest}>
+            Load latest
+          </button>
+        </div>
       )}
+      <textarea
+        className="editor"
+        value={draft}
+        placeholder="Type or paste into this note…"
+        autoFocus
+        onChange={(event) => setDraft(event.target.value)}
+      />
+    </div>
+  )
+}
+
+export const NoteView = ({ content, baseline, fading, live, editing, focus, onSave, onCloseEditor }: NoteViewProps) => {
+  const endRef = useRef<HTMLDivElement>(null)
+  const articleRef = useRef<HTMLElement>(null)
+  const html = useMemo(() => renderNote(content, baseline), [content, baseline])
+  const liveLength = live.segments.reduce((total, s) => total + s.text.length, 0) + live.partial.length
+
+  // Follow the live transcript, but only if the reader is already near the bottom.
+  useEffect(() => {
+    const end = endRef.current
+    const scroller = end?.closest('.pane-note')
+    if (!end || !scroller) return
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight
+    if (distance < NEAR_BOTTOM_PX + end.offsetHeight) end.scrollIntoView({ block: 'end', behavior: 'smooth' })
+  }, [liveLength])
+
+  // Follow the agent: bring whatever it is editing into view, again each time the note updates.
+  useEffect(() => {
+    const article = articleRef.current
+    if (!article || !focus || focus.section === null) return
+    editTarget(article, focus.section)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [focus, html])
+
+  if (editing) return <Editor content={content} onSave={onSave} onCancel={onCloseEditor} />
+
+  return (
+    <section className="note-view">
+      <article ref={articleRef} className={`markdown ${fading ? 'fading' : ''}`} dangerouslySetInnerHTML={{ __html: html }} />
+      <LiveTranscript {...live} />
+      <div ref={endRef} className="note-end" />
     </section>
   )
 }

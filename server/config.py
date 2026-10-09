@@ -14,6 +14,8 @@ LLM_API_KEY = _env("LLM_API_KEY", "")
 LLM_MODEL = _env("LLM_MODEL", "local")
 LLM_TEMPERATURE = float(_env("LLM_TEMPERATURE", "0.2"))
 LLM_MAX_STEPS = int(_env("LLM_MAX_STEPS", "10"))
+# The llama-server context size (-c in docker-compose.yml); shown in the agent inspector.
+LLM_CONTEXT = int(_env("LLM_CONTEXT", "40960"))
 
 WHISPER_MODEL = _env("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_DEVICE = _env("WHISPER_DEVICE", "cuda")

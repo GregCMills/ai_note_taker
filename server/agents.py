@@ -1,6 +1,6 @@
-"""The three agents behind a note.
+"""The three agents behind a project of notes.
 
-- Scribe: runs on every batch of speech and edits the note section by section.
+- Scribe: runs on every batch of speech and edits the notes section by section, creating notes (tabs) as needed.
 - Historian: handles undo / redo / "go back to..." through git. The scribe calls it with ask_history,
   so the git tools never clutter the scribe's context.
 - Librarian: the context manager. Writes the section summaries shown in place of collapsed sections,
@@ -13,8 +13,11 @@ os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
 
 import json
 import logging
+import re
+import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 
 from pydantic_ai import Agent, RunContext, capture_run_messages
 from pydantic_ai.exceptions import UsageLimitExceeded
@@ -33,34 +36,74 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
 
 from . import config
+from .agentlog import AgentLog, slim_messages
 from .memory import MemoryStore, NoteMemory, SectionInfo
 from .notes import NoteError, NoteStore
-from .sections import Document, Section, estimate_tokens, split_at_headings
+from .sections import Document, Section, estimate_tokens, number_sections, split_at_headings
 
 log = logging.getLogger(__name__)
 
+MAX_TOOL_FAILURES = 3
+# Rewriting a section at least this long down to under half its size is refused: it is almost always the model
+# sending only the changed sentence, which would silently delete the rest.
+SHRINK_GUARD_WORDS = 80
+
+
+class StopTurn(Exception):
+    """Ends a scribe turn that keeps failing; edits made so far are kept."""
+
+# Sub-agent runs (historian, librarian) made during the current scribe turn, for the activity log.
+SUBRUNS: ContextVar[list[dict] | None] = ContextVar("subruns", default=None)
+
+
+def record_subrun(agent: str, purpose: str, result, started: float) -> None:
+    runs = SUBRUNS.get()
+    if runs is not None:
+        runs.append(
+            {"agent": agent, "purpose": purpose, "seconds": round(time.monotonic() - started, 2),
+             "messages": slim_messages(result.all_messages())}
+        )
+
+
+def scribe_instructions(system_prompt: str, memory: NoteMemory) -> str:
+    text = system_prompt + "\n" + SCRIBE_RULES
+    if memory.history_summary:
+        text += f"\n## Earlier in this session\n{memory.history_summary}\n"
+    return text
+
+
+# Gemma occasionally leaks chat-template tokens such as "<|channel>" into its text.
+CONTROL_TOKEN = re.compile(r"<\|[a-z_]+\|?>")
+
 SCRIBE_RULES = """
 ## How this works
-Each message gives you the current note, its recent changes, new speech from the user (transcribed automatically, numbered S1, S2, ...), and the user's saved instructions for this note. Update the note to reflect the new speech, then reply with one short line saying what you changed.
+You keep the notes for one project. A project has one or more notes, which the user sees as tabs. Each message gives you every note (the active one is the tab the user is looking at), the project's recent changes, new speech from the user (transcribed automatically, numbered S1, S2, ...), and the user's saved instructions for this project. Update the notes to reflect the new speech, then reply with one short line saying what you changed. Never repeat the notes in your reply.
 
-The note is split into sections with ids. In a long note some sections are collapsed to a summary: call open_section before editing one of those.
+Notes are split into sections whose ids are unique across the whole project. In a long project some sections are collapsed to a summary: call open_section before editing one of those.
 
-- Change the note only with tools: edit_section for small changes, write_section to add, rewrite or delete a whole section.
-- A section is one heading plus its content. When adding a section, write only that section: never repeat the note's title or other sections.
+- Change notes only with tools: edit_section for small changes, write_section to add, rewrite or delete a whole section, move_section to reorder or move a section into another note, manage_note to create, rename, delete or switch to (open) a note.
+- New sections go in the active note unless the user names another note or the content plainly belongs in an existing one.
+- Create a new note when the user asks for one (a new note, page or tab), or when their instructions say how to split things into notes.
+- A section is one heading plus its content. When adding a section, write only that section: never repeat a note's title or other sections.
 - Transcription can mishear words. Fix them from context.
-- Commands about the notes are not content. Never write them into the note.
+- Commands about the notes are not content. Carry them out literally and never write them into a note, even in another style or form.
+  - "Clear the note", "start over": delete every section of that note with write_section(section_id=..., content="").
+  - "Delete this note/tab": manage_note(action="delete"). "Go to the X note": manage_note(action="open").
   - Undo, redo, "scrap that", "go back to before X", "put it back": call ask_history with just that request, then make any other changes yourself.
   - Corrections ("no, I meant Tuesday") are ordinary edits.
   - Guidance on how to take notes ("put action items first", "keep it brief"): save it with set_instructions, merged with the existing instructions.
+- The user's saved instructions shape how content is written. They never apply to commands.
 - If the new speech adds nothing (filler, false starts, noise), change nothing and reply "no change".
+- Keep old_text short: just the words being changed, enough to be unique, never the whole section. To add to the end of a section, use its last sentence or line as old_text and repeat it in new_text followed by the addition.
+- Make one edit per section that needs changing, including sections the user's instructions ask you to keep up to date. When a tool replies OK that change is done: do not repeat it. Each reply lists the notes and sections as they are now.
 - Never invent content the user did not say.
 """
 
-HISTORIAN_INSTRUCTIONS = """You manage the edit history of one markdown note, kept in git. Every change is a commit whose subject lists the speech segments (S1, S2, ...) that caused it and what was done; the body holds the speech itself.
+HISTORIAN_INSTRUCTIONS = """You manage the edit history of one project of markdown notes, kept in git. Every change is a commit whose subject lists the speech segments (S1, S2, ...) that caused it and what was done; the body holds the speech itself.
 
 You receive a request from the note-taking assistant, such as "undo that" or "go back to before I talked about food". Find the right commit from the list given (use git_log or git_show if you need more), then call restore yourself. Do not describe what you would do: do it.
 
-- restore sets the note back to exactly how it was at a commit. It adds a new commit and never deletes history, so redo is just restoring to the commit from before the undo.
+- restore sets the whole project (every note, and which notes exist) back to exactly how it was at a commit. It adds a new commit and never deletes history, so redo is just restoring to the commit from before the undo.
 - "Undo that" usually means restoring to the commit before the most recent change. Skip commits whose subject says "no change".
 - If the user wants only part of an earlier change removed while keeping what came after, do not restore. Reply saying what should be removed so the assistant can edit it.
 - Reply with one short line: what you restored to, or why you did not."""
@@ -121,26 +164,77 @@ def compact_turn(messages: list[ModelMessage], speech: str) -> list[ModelMessage
 
 
 @dataclass
+class UiHooks:
+    """How the scribe tells open browsers what it is doing, so the view can follow along."""
+
+    notes_changed: Callable[[list[str], str, int | None], Awaitable[None]]  # notes to refresh, focus note, section
+    tabs_changed: Callable[[str], Awaitable[None]]  # active note
+
+
+@dataclass
 class ScribeDeps:
-    path: str
-    doc: Document
+    project: str
+    docs: dict[str, Document]  # in tab order
+    active: str
     memory: NoteMemory
     collapsed: dict[int, str]
     system_prompt: str
-    on_change: Callable[[], Awaitable[None]]
+    hooks: UiHooks
     actions: list[str] = field(default_factory=list)
+    failures: int = 0
+    calls: set[tuple] = field(default_factory=set)
+
+    def find(self, section_id: int) -> tuple[str, Section] | None:
+        for note, doc in self.docs.items():
+            if (section := doc.get(section_id)) is not None:
+                return note, section
+        return None
+
+    def match_note(self, name: str | None) -> str | None:
+        """The note called `name`, ignoring case and spacing."""
+        wanted = " ".join((name or "").lower().removesuffix(".md").split())
+        return next((note for note in self.docs if note.lower() == wanted), None)
+
+    def outline(self) -> str:
+        notes = "; ".join(
+            f'"{note}"{" (active)" if note == self.active else ""}: '
+            + (", ".join(f"§{s.id} {s.title or '(untitled)'}" for s in doc.sections) or "(empty)")
+            for note, doc in self.docs.items()
+        )
+        return f"Notes now: {notes}"
+
+    def fail(self, message: str) -> str:
+        self.failures += 1
+        if self.failures >= MAX_TOOL_FAILURES:
+            raise StopTurn(message)
+        return f"Error: {message}. {self.outline()}"
+
+    def repeated(self, *call) -> str | None:
+        """Refuse an edit identical to one already made this turn (the model sometimes loops on success)."""
+        if call in self.calls:
+            return self.fail("that exact change was already made this turn; it is done, so stop and reply")
+        self.calls.add(call)
+        return None
+
+
+def render_project(docs: dict[str, Document], active: str, collapsed: dict[int, str]) -> str:
+    return "\n".join(
+        f'<note name="{note}"{" active" if note == active else ""}>\n{doc.render(collapsed)}\n</note>'
+        for note, doc in docs.items()
+    )
 
 
 @dataclass
 class HistorianDeps:
-    path: str
+    project: str
     restored: str | None = None
 
 
 class NoteAgents:
-    def __init__(self, notes: NoteStore, memories: MemoryStore):
+    def __init__(self, notes: NoteStore, memories: MemoryStore, activity: AgentLog):
         self.notes = notes
         self.memories = memories
+        self.activity = activity
         self.model = OpenAIChatModel(
             config.LLM_MODEL,
             provider=OpenAIProvider(base_url=config.LLM_URL, api_key=config.LLM_API_KEY or "none"),
@@ -151,27 +245,34 @@ class NoteAgents:
         self.librarian = Agent(self.model, instructions=LIBRARIAN_INSTRUCTIONS, model_settings=self.settings)
 
     async def process(
-        self, path: str, segments: list[dict], system_prompt: str, on_change: Callable[[], Awaitable[None]]
+        self, project: str, segments: list[dict], system_prompt: str, hooks: UiHooks, viewing: str | None = None
     ) -> tuple[str | None, str]:
-        """Fold new speech into the note. Returns (commit sha or None, one-line summary)."""
-        memory = self.memories.load(path)
+        """Fold new speech into the project's notes. Returns (commit sha or None, one-line summary)."""
+        started = time.monotonic()
+        subruns: list[dict] = []
+        SUBRUNS.set(subruns)
+        memory = self.memories.load(project)
         memory.turn += 1
-        doc = self._load_doc(path, memory)
-        self.notes.write(path, doc.serialize())
+        docs = self._load_project(project, memory)
+        active = next(n for n in (viewing, memory.active_note, *docs) if n in docs)
 
         await self._compact_history(memory)
-        collapsed = await self._collapse(doc, memory)
-        deps = ScribeDeps(path, doc, memory, collapsed, system_prompt, on_change)
+        collapsed = await self._collapse(docs, memory)
+        deps = ScribeDeps(project, docs, active, memory, collapsed, system_prompt, hooks)
         speech = "\n".join(f"S{s['id']}: {s['text']}" for s in segments)
-        commits = "\n".join(describe_commit(c) for c in self.notes.log(path, config.RECENT_COMMITS_IN_CONTEXT))
+        commits = "\n".join(describe_commit(c) for c in self.notes.log(project, config.RECENT_COMMITS_IN_CONTEXT))
+        tabs = ", ".join(f'"{n}"' + (" (active: the user is looking at this one)" if n == active else "") for n in docs)
         prompt = (
-            f'The note "{path}" currently reads:\n<note>\n{doc.render(collapsed)}\n</note>\n\n'
+            f'Project "{project}" has these notes, shown as tabs: {tabs}\n\n'
+            f"{render_project(docs, active, collapsed)}\n\n"
             f"Recent changes (newest first; ask_history can undo or restore any of these):\n{commits}\n\n"
-            f"Update the document as per this transcription:\n{speech}\n\n"
-            f"Remember this, the user's instructions for this note:\n{memory.instructions or '(none yet)'}"
+            f"Update the notes as per this transcription:\n{speech}\n\n"
+            f"Remember this, the user's instructions for this project:\n{memory.instructions or '(none yet)'}"
         )
 
         history = memory.history()
+        instructions = scribe_instructions(system_prompt, memory)
+        history_tokens = sum(estimate_tokens(describe_turn(t)) for t in memory.turns)
         with capture_run_messages() as messages:
             try:
                 result = await self.scribe.run(
@@ -180,35 +281,62 @@ class NoteAgents:
                     message_history=history,
                     usage_limits=UsageLimits(request_limit=config.LLM_MAX_STEPS),
                 )
-                summary = result.output.strip()
+                # Only the first line: the model sometimes echoes the whole note after its summary.
+                summary = next(iter(CONTROL_TOKEN.sub("", result.output).strip().splitlines()), "")
                 turn = result.new_messages()
-            except UsageLimitExceeded:
-                log.warning("Scribe hit the step limit on %s", path)
-                summary = "stopped after too many steps"
+            except (UsageLimitExceeded, StopTurn) as stopped:
+                log.warning("Scribe stopped early on %s: %s", project, stopped)
+                summary = "; ".join(deps.actions) or "stopped: could not make that change"
                 turn = [*messages[len(history):], ModelResponse(parts=[TextPart(summary)])]
         memory.turns.append(compact_turn(turn, speech))
+        memory.active_note = deps.active
 
-        self.memories.save(path, memory)
+        self.memories.save(project, memory)
         ids = " ".join(f"S{s['id']}" for s in segments)
         subject = f"[{ids}] {'; '.join(deps.actions) or 'no change'}"
-        sha = self.notes.commit(path, f"{subject}\n\n{summary}\n\n{speech}")
+        sha = self.notes.commit(project, f"{subject}\n\n{summary}\n\n{speech}")
+        self.activity.append(project, {
+            "time": time.time(),
+            "seconds": round(time.monotonic() - started, 2),
+            "segments": [s["id"] for s in segments],
+            "speech": speech,
+            "summary": summary,
+            "actions": deps.actions,
+            "commit": sha,
+            "estimate": {
+                "instructions": estimate_tokens(instructions),
+                "history": history_tokens,
+                "notes": estimate_tokens(render_project(docs, active, collapsed)),
+                "prompt": estimate_tokens(prompt),
+            },
+            "history_turns": len(memory.turns) - 1,
+            "collapsed_sections": len(collapsed),
+            "instructions": instructions,
+            "prompt": prompt,
+            "messages": slim_messages(turn),
+            "subruns": subruns,
+        })
         return sha, summary or "; ".join(deps.actions) or "no change"
 
     # ---- context management -------------------------------------------------------------------
 
-    def _load_doc(self, path: str, memory: NoteMemory) -> Document:
-        doc = Document.parse(self.notes.read(path), memory.next_section_id)
-        memory.next_section_id = max(memory.next_section_id, max(doc.ids(), default=0) + 1)
-        return doc
+    def _load_project(self, project: str, memory: NoteMemory) -> dict[str, Document]:
+        """Every note in tab order, with section ids made unique across the project (and written back)."""
+        docs = {note: Document.parse(self.notes.read(project, note), assign=False) for note in self.notes.notes(project)}
+        memory.next_section_id = number_sections(list(docs.values()), memory.next_section_id)
+        for note, doc in docs.items():
+            self.notes.write(project, note, doc.serialize())
+        return docs
 
-    async def _collapse(self, doc: Document, memory: NoteMemory) -> dict[int, str]:
-        """Collapse the least recently touched sections to summaries until the note fits its budget."""
-        total = doc.tokens()
+    async def _collapse(self, docs: dict[str, Document], memory: NoteMemory) -> dict[int, str]:
+        """Collapse the least recently touched sections to summaries until the project fits its budget."""
+        sections = [s for doc in docs.values() for s in doc.sections]
+        total = sum(doc.tokens() for doc in docs.values())
         if total <= config.NOTE_TOKEN_BUDGET:
             return {}
         target = int(config.NOTE_TOKEN_BUDGET * 0.75)
         collapsed: dict[int, str] = {}
-        oldest_first = sorted(doc.sections, key=lambda s: memory.sections.get(s.id, SectionInfo()).touched)
+        oldest_first = sorted(sections, key=lambda s: memory.sections.get(s.id, SectionInfo()).touched)
         for section in oldest_first:
             if total <= target:
                 break
@@ -224,10 +352,12 @@ class NoteAgents:
     async def _section_summary(self, section: Section, memory: NoteMemory) -> str:
         info = memory.sections.setdefault(section.id, SectionInfo())
         if info.digest != section.digest or not info.summary:
+            started = time.monotonic()
             result = await self.librarian.run(
                 "Summarise this note section in at most two sentences, so an assistant knows what it "
                 f"contains and when it would need to open it:\n\n{section.text}"
             )
+            record_subrun("librarian", f"summarise §{section.id}", result, started)
             info.summary, info.digest = result.output.strip(), section.digest
         return info.summary
 
@@ -243,6 +373,7 @@ class NoteAgents:
         if not old:
             return
         transcript = "\n\n".join(describe_turn(turn) for turn in old)
+        started = time.monotonic()
         result = await self.librarian.run(
             "Below is the running summary of a note-taking session, then older turns that are leaving the "
             "assistant's context. Write an updated summary of the conversation, under 200 words. The assistant "
@@ -251,6 +382,7 @@ class NoteAgents:
             "(by section id), and anything the user said they would come back to.\n\n"
             f"Current summary:\n{memory.history_summary or '(none)'}\n\nOlder turns:\n{transcript}"
         )
+        record_subrun("librarian", f"summarise {len(old)} old turns", result, started)
         memory.history_summary = result.output.strip()
         memory.turns = recent
         log.info("Summarised %d old turns", len(old))
@@ -262,72 +394,187 @@ class NoteAgents:
 
         @scribe.instructions
         def instructions(ctx: RunContext[ScribeDeps]) -> str:
-            text = ctx.deps.system_prompt + "\n" + SCRIBE_RULES
-            if ctx.deps.memory.history_summary:
-                text += f"\n## Earlier in this session\n{ctx.deps.memory.history_summary}\n"
-            return text
+            return scribe_instructions(ctx.deps.system_prompt, ctx.deps.memory)
 
         @scribe.tool
         async def edit_section(ctx: RunContext[ScribeDeps], section_id: int, old_text: str, new_text: str) -> str:
             """Replace exact text inside one section. old_text must appear exactly once in it; use an empty new_text to delete.
 
+            Keep old_text short (a few words to a sentence), never the whole section.
+
             Args:
-                section_id: The section to edit.
-                old_text: Exact text currently in the section.
+                section_id: The section to edit (in any note).
+                old_text: The exact words being changed, just enough to be unique. To append, the section's last sentence.
                 new_text: Replacement text.
             """
             deps = ctx.deps
-            section = deps.doc.get(section_id)
-            if section is None:
-                return f"Error: no section {section_id}. Sections: {sorted(deps.doc.ids())}"
+            if refused := deps.repeated("edit", section_id, old_text, new_text):
+                return refused
+            found = deps.find(section_id)
+            if found is None:
+                return deps.fail(f"no section {section_id}")
+            note, section = found
             if section_id in deps.collapsed:
-                return f"Error: section {section_id} is collapsed. Call open_section({section_id}) first."
+                return deps.fail(f"section {section_id} is collapsed; call open_section({section_id}) first")
             count = section.text.count(old_text) if old_text else 0
-            if count != 1:
-                return f"Error: old_text appears {count} times in section {section_id}; it must match exactly once."
-            section.text = section.text.replace(old_text, new_text, 1)
-            added = await self._save(deps, f"edit §{section_id}", [section_id])
-            return "OK" + (f". New sections created from added headings: {added}" if added else "")
+            if count > 1 and old_text.strip() and section.text.rstrip().endswith(old_text.strip()):
+                # Quoting the section's closing words means "add to the end": use the final occurrence.
+                cut = section.text.rstrip().rfind(old_text.strip())
+                section.text = section.text[:cut] + new_text.strip() + "\n"
+            elif count > 1:
+                return deps.fail(
+                    f"old_text appears {count} times in section {section_id}; include a few more words around it so it is unique"
+                )
+            elif count == 0:
+                return deps.fail(f"old_text is not in section {section_id}; copy it exactly from the section")
+            else:
+                section.text = section.text.replace(old_text, new_text, 1)
+            await self._save(deps, [note], note, f"edit §{section_id}", [section_id])
+            return f"OK. {deps.outline()}"
 
         @scribe.tool
         async def write_section(
-            ctx: RunContext[ScribeDeps], content: str, section_id: int | None = None, after_section_id: int | None = None
+            ctx: RunContext[ScribeDeps],
+            content: str,
+            section_id: int | None = None,
+            after_section_id: int | None = None,
+            note: str | None = None,
         ) -> str:
             """Add, rewrite or delete a whole section (heading included).
 
             Args:
                 content: Markdown for this one section, starting with its own heading (e.g. "## Food"). Empty deletes the section.
                 section_id: The section to rewrite or delete. Omit to add a new section.
-                after_section_id: Where to add a new section. Omit to add at the end.
+                after_section_id: Where to add a new section. Omit to add at the end of the note; 0 for its top.
+                note: Which note to add a new section to. Omit for the active note.
             """
             deps = ctx.deps
-            others = {s.text.strip() for s in deps.doc.sections if s.id != section_id}
-            content = "\n\n".join(p for p in split_at_headings(content) if p.strip() not in others)
+            if refused := deps.repeated("write", content, section_id, after_section_id, note):
+                return refused
             if section_id is not None:
-                section = deps.doc.get(section_id)
-                if section is None:
-                    return f"Error: no section {section_id}. Sections: {sorted(deps.doc.ids())}"
+                found = deps.find(section_id)
+                if found is None:
+                    return deps.fail(f"no section {section_id}")
+                target, section = found
                 if not content.strip():
-                    deps.doc.sections.remove(section)
+                    deps.docs[target].sections.remove(section)
                     deps.collapsed.pop(section_id, None)
-                    await self._save(deps, f"delete §{section_id}", [])
-                    return "OK, deleted"
+                    await self._save(deps, [target], target, f"delete §{section_id}", [])
+                    return f"OK, deleted. {deps.outline()}"
+                old_words, new_words = len(section.text.split()), len(content.split())
+                if old_words >= SHRINK_GUARD_WORDS and new_words < old_words / 2:
+                    return deps.fail(
+                        f"that would cut section {section_id} from {old_words} words to {new_words}. To change part of "
+                        "a section use edit_section; to delete it, write empty content"
+                    )
                 section.text = content
                 deps.collapsed.pop(section_id, None)
-                added = await self._save(deps, f"rewrite §{section_id}", [section_id])
-                return "OK" + (f". New sections created from added headings: {added}" if added else "")
+                await self._save(deps, [target], target, f"rewrite §{section_id}", [section_id])
+                return f"OK. {deps.outline()}"
 
+            anchor = deps.find(after_section_id) if after_section_id else None
+            if after_section_id and anchor is None:
+                return deps.fail(f"no section {after_section_id}")
+            target = anchor[0] if anchor else (deps.match_note(note) if note else deps.active)
+            if target is None:
+                return deps.fail(f'no note "{note}"; create it first with manage_note(action="create")')
+            doc = deps.docs[target]
+            # The model sometimes repeats the note's title or other sections when adding one.
+            existing = {s.text.strip() for s in doc.sections}
+            content = "\n\n".join(p for p in split_at_headings(content) if p.strip() not in existing)
             if not content.strip():
-                return "Error: content is empty, or only repeats existing sections"
-            position = len(deps.doc.sections)
-            if after_section_id is not None:
-                anchor = deps.doc.get(after_section_id)
-                if anchor is None:
-                    return f"Error: no section {after_section_id}. Sections: {sorted(deps.doc.ids())}"
-                position = deps.doc.sections.index(anchor) + 1
-            deps.doc.sections.insert(position, Section(None, content))
-            added = await self._save(deps, "add", [])
-            return f"OK, added as section {', '.join(map(str, added))}"
+                return deps.fail("that section already exists word for word, so nothing was added (to reorder, use move_section)")
+            for piece in split_at_headings(content):
+                twin = next((s for s in doc.sections if s.title and s.title.lower() == Section(None, piece).title.lower()), None)
+                if twin is not None:
+                    return deps.fail(
+                        f'§{twin.id} is already "{twin.title}"; add to it with edit_section(section_id={twin.id}) instead of a second section'
+                    )
+            position = doc.sections.index(anchor[1]) + 1 if anchor else (0 if after_section_id == 0 else len(doc.sections))
+            doc.sections.insert(position, Section(None, content))
+            await self._save(deps, [target], target, "add", [])
+            return f"OK, added. {deps.outline()}"
+
+        @scribe.tool
+        async def move_section(
+            ctx: RunContext[ScribeDeps], section_id: int, after_section_id: int, note: str | None = None
+        ) -> str:
+            """Move a section below another section, which may be in a different note. Use 0 to move it to the top of a note.
+
+            Args:
+                section_id: The section to move.
+                after_section_id: The section it should come after, or 0 for the top of a note.
+                note: With after_section_id 0, which note's top to move it to. Omit for its current note.
+            """
+            deps = ctx.deps
+            if refused := deps.repeated("move", section_id, after_section_id, note):
+                return refused
+            found = deps.find(section_id)
+            if found is None:
+                return deps.fail(f"no section {section_id}")
+            source, section = found
+            if after_section_id == section_id:
+                return deps.fail("a section cannot be moved below itself")
+            anchor = deps.find(after_section_id) if after_section_id else None
+            if after_section_id and anchor is None:
+                return deps.fail(f"no section {after_section_id}")
+            target = anchor[0] if anchor else (deps.match_note(note) if note else source)
+            if target is None:
+                return deps.fail(f'no note "{note}"')
+            deps.docs[source].sections.remove(section)
+            sections = deps.docs[target].sections
+            sections.insert(sections.index(anchor[1]) + 1 if anchor else 0, section)
+            where = f" to {target}" if target != source else ""
+            await self._save(deps, list({source, target}), target, f"move §{section_id}{where}", [section_id])
+            return f"OK, moved. {deps.outline()}"
+
+        @scribe.tool
+        async def manage_note(
+            ctx: RunContext[ScribeDeps],
+            action: Literal["create", "rename", "delete", "open"],
+            name: str,
+            new_name: str | None = None,
+        ) -> str:
+            """Create, rename, delete, or open (switch the user's view to) a note, i.e. a tab in this project.
+
+            Args:
+                action: What to do.
+                name: The note to act on, or the new note's name when creating.
+                new_name: The new name, when renaming.
+            """
+            deps = ctx.deps
+            if refused := deps.repeated("note", action, name, new_name):
+                return refused
+            existing = deps.match_note(name)
+            try:
+                if action == "create":
+                    if existing:
+                        return deps.fail(f'note "{existing}" already exists; use manage_note(action="open") to switch to it')
+                    created = self.notes.create_note(deps.project, name, after=deps.active)
+                    deps.docs = {n: deps.docs.get(n) or Document([]) for n in self.notes.notes(deps.project)}
+                    deps.active = created
+                    deps.actions.append(f'create note "{created}"')
+                elif existing is None:
+                    return deps.fail(f'no note "{name}"')
+                elif action == "rename":
+                    if not new_name:
+                        return deps.fail("new_name is needed to rename a note")
+                    renamed = self.notes.rename_note(deps.project, existing, new_name)
+                    deps.docs = {renamed if n == existing else n: d for n, d in deps.docs.items()}
+                    deps.active = renamed if deps.active == existing else deps.active
+                    deps.actions.append(f'rename note "{existing}" to "{renamed}"')
+                elif action == "delete":
+                    self.notes.delete_note(deps.project, existing)
+                    for section in deps.docs.pop(existing).sections:
+                        deps.collapsed.pop(section.id, None)
+                    deps.active = deps.active if deps.active in deps.docs else next(iter(deps.docs))
+                    deps.actions.append(f'delete note "{existing}"')
+                else:
+                    deps.active = existing
+            except NoteError as error:
+                return deps.fail(str(error))
+            await deps.hooks.tabs_changed(deps.active)
+            return f"OK. {deps.outline()}"
 
         @scribe.tool
         def open_section(ctx: RunContext[ScribeDeps], section_id: int) -> str:
@@ -336,64 +583,72 @@ class NoteAgents:
             Args:
                 section_id: The section to open.
             """
-            section = ctx.deps.doc.get(section_id)
-            if section is None:
-                return f"Error: no section {section_id}. Sections: {sorted(ctx.deps.doc.ids())}"
+            found = ctx.deps.find(section_id)
+            if found is None:
+                return ctx.deps.fail(f"no section {section_id}")
             ctx.deps.collapsed.pop(section_id, None)
             ctx.deps.memory.touch(section_id)
-            return section.text
+            return found[1].text
 
         @scribe.tool
         async def set_instructions(ctx: RunContext[ScribeDeps], instructions: str) -> str:
-            """Save the user's guidance for how to take notes in this note. Replaces the saved instructions, so include anything still relevant from before.
+            """Save the user's guidance for how to take notes in this project. Replaces the saved instructions, so include anything still relevant from before.
 
             Args:
                 instructions: The complete instructions to remember.
             """
             ctx.deps.memory.instructions = instructions.strip()
             ctx.deps.actions.append("set instructions")
-            await ctx.deps.on_change()
             return "OK, saved"
 
         @scribe.tool
         async def ask_history(ctx: RunContext[ScribeDeps], request: str) -> str:
-            """Ask the history keeper to undo, redo, or go back to an earlier version of the note.
+            """Ask the history keeper to undo, redo, or go back to an earlier version of the project.
 
             Args:
                 request: What the user wants, in their words plus any detail you know.
             """
             deps = ctx.deps
-            commits = "\n".join(describe_commit(c) for c in self.notes.log(deps.path, 10))
-            historian = HistorianDeps(deps.path)
+            commits = "\n".join(describe_commit(c) for c in self.notes.log(deps.project, 10))
+            historian = HistorianDeps(deps.project)
+            started = time.monotonic()
             result = await self.historian.run(
                 f"Request: {request}\n\nRecent commits (newest first):\n{commits}",
                 deps=historian,
                 usage_limits=UsageLimits(request_limit=6),
             )
+            record_subrun("historian", request, result, started)
             if not historian.restored:
                 return result.output
-            deps.doc = self._load_doc(deps.path, deps.memory)
-            deps.collapsed = {k: v for k, v in deps.collapsed.items() if deps.doc.get(k)}
+            deps.docs = self._load_project(deps.project, deps.memory)
+            deps.collapsed = {k: v for k, v in deps.collapsed.items() if deps.find(k)}
+            deps.active = deps.active if deps.active in deps.docs else next(iter(deps.docs))
             deps.actions.append(f"restore {historian.restored[:7]}")
-            await deps.on_change()
-            return f"{result.output}\n\nThe note now reads:\n{deps.doc.render(deps.collapsed)}"
+            await deps.hooks.tabs_changed(deps.active)
+            await deps.hooks.notes_changed(list(deps.docs), deps.active, None)
+            return f"{result.output}\n\nThe notes now read:\n{render_project(deps.docs, deps.active, deps.collapsed)}"
 
         return scribe
 
-    async def _save(self, deps: ScribeDeps, action: str, touched: list[int]) -> list[int]:
-        """Write the scribe's working document to disk. Returns ids of sections that are new."""
-        before = deps.doc.ids()
-        deps.doc = deps.doc.normalised(deps.memory.next_section_id)
-        added = sorted(deps.doc.ids() - before)
-        deps.memory.next_section_id = max(deps.memory.next_section_id, max(deps.doc.ids(), default=0) + 1)
+    async def _save(self, deps: ScribeDeps, notes: list[str], focus: str, action: str, touched: list[int]) -> None:
+        """Write changed notes to disk, renumber new sections, and point the user's view at the change."""
+        before = {s.id for doc in deps.docs.values() for s in doc.sections}
+        for note in notes:
+            deps.docs[note] = Document.parse(deps.docs[note].serialize(), assign=False)
+        deps.memory.next_section_id = number_sections(list(deps.docs.values()), deps.memory.next_section_id)
+        added = sorted({s.id for doc in deps.docs.values() for s in doc.sections} - before)
         for section_id in [*touched, *added]:
             deps.memory.touch(section_id)
         if added and action == "add":
             action = "add " + " ".join(f"§{i}" for i in added)
         deps.actions.append(action)
-        self.notes.write(deps.path, deps.doc.serialize())
-        await deps.on_change()
-        return added
+        for note in notes:
+            self.notes.write(deps.project, note, deps.docs[note].serialize())
+        tab_changed = deps.active != focus
+        deps.active = focus
+        if tab_changed:
+            await deps.hooks.tabs_changed(focus)
+        await deps.hooks.notes_changed(notes, focus, (touched or added or [None])[0])
 
     # ---- historian ----------------------------------------------------------------------------
 
@@ -404,34 +659,34 @@ class NoteAgents:
 
         @historian.tool
         def git_log(ctx: RunContext[HistorianDeps], limit: int = 30) -> str:
-            """List commits for this note, newest first, with the speech that caused each.
+            """List commits for this project, newest first, with the speech that caused each.
 
             Args:
                 limit: How many commits to list.
             """
-            return "\n".join(describe_commit(c) for c in self.notes.log(ctx.deps.path, limit)) or "(no commits)"
+            return "\n".join(describe_commit(c) for c in self.notes.log(ctx.deps.project, limit)) or "(no commits)"
 
         @historian.tool
         def git_show(ctx: RunContext[HistorianDeps], commit: str) -> str:
-            """Show the diff a commit made to this note.
+            """Show the diff a commit made to this project.
 
             Args:
                 commit: Commit id.
             """
             try:
-                return self.notes.show(ctx.deps.path, commit)[:4000]
+                return self.notes.show(ctx.deps.project, commit)[:4000]
             except NoteError as error:
                 return f"Error: {error}"
 
         @historian.tool
         def restore(ctx: RunContext[HistorianDeps], commit: str) -> str:
-            """Set the note back to exactly how it was at a commit. History is kept, so this can itself be undone.
+            """Set the whole project back to exactly how it was at a commit. History is kept, so this can itself be undone.
 
             Args:
                 commit: Commit id to restore to.
             """
             try:
-                self.notes.restore(ctx.deps.path, commit)
+                self.notes.restore(ctx.deps.project, commit)
             except NoteError as error:
                 return f"Error: {error}"
             ctx.deps.restored = commit

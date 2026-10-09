@@ -43,7 +43,7 @@ class Document:
         self.sections = sections
 
     @classmethod
-    def parse(cls, raw: str, next_id_floor: int = 1) -> "Document":
+    def parse(cls, raw: str, next_id_floor: int = 1, assign: bool = True) -> "Document":
         chunks: list[tuple[int | None, str]] = []
         matches = list(MARKER.finditer(raw))
         if not matches or matches[0].start() > 0:
@@ -60,6 +60,8 @@ class Document:
                     seen.add(keep)
                 sections.append(Section(keep, piece))
 
+        if not assign:
+            return cls(sections)
         next_id = max(max(seen, default=0) + 1, next_id_floor)
         for section in sections:
             if section.id is None:
@@ -103,3 +105,21 @@ class Document:
 
 def strip_markers(raw: str) -> str:
     return MARKER.sub("", raw)
+
+
+def number_sections(docs: list[Document], next_id_floor: int) -> int:
+    """Give every new or duplicated section an id unique across a project's notes. Returns the next free id."""
+    seen: set[int] = set()
+    for doc in docs:
+        for section in doc.sections:
+            if section.id is None or section.id in seen:
+                section.id = None
+            else:
+                seen.add(section.id)
+    next_id = max(max(seen, default=0) + 1, next_id_floor)
+    for doc in docs:
+        for section in doc.sections:
+            if section.id is None:
+                section.id = next_id
+                next_id += 1
+    return next_id

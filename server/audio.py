@@ -24,6 +24,13 @@ class Segmenter:
         self._vad = VadOptions(min_silence_duration_ms=300, speech_pad_ms=200)
         self._buffer = np.zeros(0, dtype=np.float32)
         self._unchecked = 0
+        self._speech_start: int | None = None
+
+    def in_progress(self) -> np.ndarray | None:
+        """Audio of the sentence still being spoken, if any (for provisional transcripts)."""
+        if self._speech_start is None:
+            return None
+        return self._buffer[self._speech_start:].copy()
 
     def feed(self, pcm16: bytes) -> list[np.ndarray]:
         samples = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32) / 32768.0
@@ -41,6 +48,7 @@ class Segmenter:
 
     def _split(self, final: bool) -> list[np.ndarray]:
         speech = get_speech_timestamps(self._buffer, self._vad)
+        self._speech_start = None
         if not speech:
             self._buffer = self._buffer[-SAMPLE_RATE:]
             return []
@@ -55,6 +63,8 @@ class Segmenter:
         else:
             if start > SAMPLE_RATE:
                 self._buffer = self._buffer[start - SAMPLE_RATE // 2:]
+                start = SAMPLE_RATE // 2
+            self._speech_start = start
             return []
 
         segment = self._buffer[start:cut]
@@ -76,13 +86,13 @@ class Transcriber:
             if self._model is None:
                 self._model = WhisperModel(model, device=device, compute_type=compute_type)
 
-    def transcribe(self, audio: np.ndarray, previous_text: str = "") -> str:
+    def transcribe(self, audio: np.ndarray, previous_text: str = "", fast: bool = False) -> str:
         self.load()
         with self._lock:
             segments, _ = self._model.transcribe(
                 audio,
                 language=self._language,
-                beam_size=5,
+                beam_size=1 if fast else 5,
                 vad_filter=False,
                 condition_on_previous_text=False,
                 initial_prompt=previous_text[-200:] or None,

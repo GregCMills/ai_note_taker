@@ -1,4 +1,4 @@
-"""Fans events out to the browser tabs viewing each note."""
+"""Fans events out to the browsers viewing each project."""
 
 from fastapi import WebSocket
 
@@ -13,11 +13,11 @@ class Hub:
     def remove(self, ws: WebSocket) -> None:
         self._clients.pop(ws, None)
 
-    def subscribe(self, ws: WebSocket, path: str | None) -> None:
-        self._clients[ws] = path
+    def subscribe(self, ws: WebSocket, project: str | None) -> None:
+        self._clients[ws] = project
 
-    async def send(self, path: str, message: dict) -> None:
-        await self._send([ws for ws, p in self._clients.items() if p == path], {**message, "path": path})
+    async def send(self, project: str, message: dict) -> None:
+        await self._send([ws for ws, p in self._clients.items() if p == project], {**message, "project": project})
 
     async def send_all(self, message: dict) -> None:
         await self._send(list(self._clients), message)

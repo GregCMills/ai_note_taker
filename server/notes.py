@@ -1,15 +1,30 @@
-"""Markdown notes stored in a git repository. Every change is a commit, which is what undo is built on."""
+"""Projects of markdown notes, stored in a git repository. Every change is a commit, which is what undo is built on.
 
+A project is a folder; each note in it is a `.md` file shown as a tab. The tab order lives in the project's
+`.order` file, so restoring an old commit brings back the tabs exactly as they were.
+"""
+
+import json
 import subprocess
 import threading
 from pathlib import Path
 
 FIELD = "\x1f"
 RECORD = "\x1e"
+ORDER_FILE = ".order"
+DEFAULT_NOTE = "Notes"
+FORBIDDEN = set('/\\:*?"<>|')
 
 
 class NoteError(Exception):
     pass
+
+
+def clean_name(name: str, kind: str) -> str:
+    name = " ".join(name.strip().removesuffix(".md").split())
+    if not name or name.startswith(".") or FORBIDDEN & set(name) or len(name) > 80:
+        raise NoteError(f"Invalid {kind} name: {name!r}")
+    return name
 
 
 class NoteStore:
@@ -34,80 +49,131 @@ class NoteStore:
             raise NoteError((result.stderr or result.stdout).strip())
         return result.stdout
 
-    def normalise(self, path: str) -> str:
-        clean = path.strip().strip("/")
-        if not clean.endswith(".md"):
-            clean += ".md"
-        full = (self.root / clean).resolve()
-        if self.root not in full.parents or ".git" in full.relative_to(self.root).parts:
-            raise NoteError(f"Invalid note path: {path}")
-        return full.relative_to(self.root).as_posix()
+    # ---- projects -----------------------------------------------------------------------------
 
-    def _file(self, path: str) -> Path:
-        return self.root / self.normalise(path)
+    def _dir(self, project: str) -> Path:
+        return self.root / clean_name(project, "project")
 
-    def paths(self) -> list[str]:
-        return sorted(
-            p.relative_to(self.root).as_posix()
-            for p in self.root.rglob("*.md")
-            if ".git" not in p.relative_to(self.root).parts
-        )
+    def projects(self) -> list[str]:
+        """Project names, most recently changed first."""
+        dirs = [p for p in self.root.iterdir() if p.is_dir() and not p.name.startswith(".")]
+        changed = {p: max((f.stat().st_mtime for f in p.iterdir()), default=p.stat().st_mtime) for p in dirs}
+        return [p.name for p in sorted(dirs, key=lambda p: changed[p], reverse=True)]
 
-    def exists(self, path: str) -> bool:
-        return self._file(path).is_file()
+    def project_exists(self, project: str) -> bool:
+        return self._dir(project).is_dir()
 
-    def read(self, path: str) -> str:
-        file = self._file(path)
-        if not file.is_file():
-            raise NoteError(f"No such note: {path}")
-        return file.read_text(encoding="utf-8")
+    def create_project(self, project: str) -> str:
+        project = clean_name(project, "project")
+        if self.project_exists(project):
+            raise NoteError(f"Project already exists: {project}")
+        self.create_note(project, DEFAULT_NOTE)
+        self.commit(project, f"Create project {project}")
+        return project
 
-    def write(self, path: str, content: str) -> None:
-        """Write to the working tree without committing."""
-        file = self._file(path)
-        file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(content, encoding="utf-8")
-
-    def create(self, path: str) -> str:
-        path = self.normalise(path)
-        if self.exists(path):
-            raise NoteError(f"Note already exists: {path}")
-        title = Path(path).stem.replace("-", " ").replace("_", " ")
-        self.write(path, f"# {title}\n")
-        self.commit(path, f"Create {path}")
-        return path
-
-    def delete(self, path: str) -> None:
-        path = self.normalise(path)
+    def delete_projects(self, projects: list[str]) -> None:
+        names = [clean_name(p, "project") for p in projects]
         with self._lock:
-            self._git("rm", "-q", "-f", "--", path)
-            self._git("commit", "-q", "-m", f"Delete {path}")
+            for name in names:
+                if self.project_exists(name):
+                    self._git("rm", "-r", "-q", "-f", "--", name)
+            self._git("commit", "-q", "--allow-empty", "-m", f"Delete {', '.join(names)}")
 
-    def rename(self, old: str, new: str) -> str:
-        old, new = self.normalise(old), self.normalise(new)
-        if self.exists(new):
-            raise NoteError(f"Note already exists: {new}")
-        (self.root / new).parent.mkdir(parents=True, exist_ok=True)
+    def rename_project(self, old: str, new: str) -> str:
+        old, new = clean_name(old, "project"), clean_name(new, "project")
+        if self.project_exists(new):
+            raise NoteError(f"Project already exists: {new}")
         with self._lock:
             self.commit(old, f"Save {old} before rename")
             self._git("mv", "--", old, new)
-            self._git("commit", "-q", "-m", f"Rename {old} to {new}")
+            self._git("commit", "-q", "-m", f"Rename project {old} to {new}")
         return new
 
-    def commit(self, path: str, message: str) -> str | None:
-        """Commit the note if it changed. Returns the new commit sha, or None if nothing changed."""
-        path = self.normalise(path)
+    # ---- notes (tabs) -------------------------------------------------------------------------
+
+    def _file(self, project: str, note: str) -> Path:
+        return self._dir(project) / f"{clean_name(note, 'note')}.md"
+
+    def notes(self, project: str) -> list[str]:
+        """The project's notes in tab order."""
+        folder = self._dir(project)
+        on_disk = sorted(p.stem for p in folder.glob("*.md")) if folder.is_dir() else []
+        order_file = folder / ORDER_FILE
+        saved = json.loads(order_file.read_text()) if order_file.exists() else []
+        return [n for n in saved if n in on_disk] + [n for n in on_disk if n not in saved]
+
+    def _save_order(self, project: str, order: list[str]) -> None:
+        (self._dir(project) / ORDER_FILE).write_text(json.dumps(order))
+
+    def note_exists(self, project: str, note: str) -> bool:
+        return self._file(project, note).is_file()
+
+    def read(self, project: str, note: str) -> str:
+        file = self._file(project, note)
+        if not file.is_file():
+            raise NoteError(f'No note "{note}" in {project}')
+        return file.read_text(encoding="utf-8")
+
+    def write(self, project: str, note: str, content: str) -> None:
+        """Write to the working tree; changes are committed together at the end of a turn."""
+        file = self._file(project, note)
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(content, encoding="utf-8")
+
+    def create_note(self, project: str, note: str, after: str | None = None) -> str:
+        note = clean_name(note, "note")
+        if self.note_exists(project, note):
+            raise NoteError(f'Note "{note}" already exists')
+        order = self.notes(project)
+        self.write(project, note, "")
+        position = order.index(after) + 1 if after in order else len(order)
+        self._save_order(project, [*order[:position], note, *order[position:]])
+        return note
+
+    def delete_note(self, project: str, note: str) -> None:
+        order = self.notes(project)
+        if note not in order:
+            raise NoteError(f'No note "{note}"')
+        if len(order) == 1:
+            raise NoteError("A project needs at least one note")
+        self._file(project, note).unlink()
+        self._save_order(project, [n for n in order if n != note])
+
+    def rename_note(self, project: str, old: str, new: str) -> str:
+        new = clean_name(new, "note")
+        order = self.notes(project)
+        if old not in order:
+            raise NoteError(f'No note "{old}"')
+        if new in order:
+            raise NoteError(f'Note "{new}" already exists')
+        self._file(project, old).rename(self._file(project, new))
+        self._save_order(project, [new if n == old else n for n in order])
+        return new
+
+    # ---- history ------------------------------------------------------------------------------
+
+    def commit(self, project: str, message: str) -> str | None:
+        """Commit everything that changed in the project. Returns the commit sha, or None if nothing changed."""
+        folder = clean_name(project, "project")
         with self._lock:
-            if not self._git("status", "--porcelain", "--", path).strip():
+            self._git("add", "-A", "--", folder)
+            if not self._git("diff", "--cached", "--name-only", "--", folder).strip():
                 return None
-            self._git("add", "--", path)
-            self._git("commit", "-q", "-m", message, "--", path)
+            self._git("commit", "-q", "-m", message, "--", folder)
             return self._git("rev-parse", "HEAD").strip()
 
-    def log(self, path: str, limit: int = 20) -> list[dict]:
-        path = self.normalise(path)
+    def _history_range(self, folder: str) -> list[str]:
+        """Commits since this project was created (or renamed to this name).
+
+        A deleted project's commits stay in git, so a new project reusing the name must not see them.
+        """
+        start = self._git("log", "-1", "--diff-filter=AR", "--format=%H", "--", f"{folder}/{ORDER_FILE}").strip()
+        return [f"{start}^..HEAD"] if start else []
+
+    def log(self, project: str, limit: int = 20) -> list[dict]:
+        folder = clean_name(project, "project")
         out = self._git(
-            "log", "--follow", f"-n{limit}", f"--format=%H{FIELD}%ct{FIELD}%s{FIELD}%b{RECORD}", "--", path
+            "log", f"-n{limit}", f"--format=%H{FIELD}%ct{FIELD}%s{FIELD}%b{RECORD}", *self._history_range(folder), "--", folder
         )
         commits = []
         for record in out.split(RECORD):
@@ -120,36 +186,44 @@ class NoteStore:
             )
         return commits
 
-    def show(self, path: str, sha: str) -> str:
-        path = self.normalise(path)
-        return self._git("show", "--format=%s%n%n%b", self._verify(sha), "--", path)
-
-    def revert(self, path: str, sha: str) -> None:
-        """Undo the changes one commit made to this note, keeping everything after it."""
-        path = self.normalise(path)
+    def _in_history(self, folder: str, sha: str) -> str:
+        """Refuse commits from before this project existed (e.g. a deleted project with the same name)."""
         sha = self._verify(sha)
-        diff = self._git("diff", f"{sha}^", sha, "--", path)
+        listed = self._git("rev-list", *(self._history_range(folder) or ["HEAD"]), "--", folder).split()
+        if sha not in listed:
+            raise NoteError(f"Commit {sha[:7]} is not part of this project's history")
+        return sha
+
+    def show(self, project: str, sha: str) -> str:
+        folder = clean_name(project, "project")
+        return self._git("show", "--format=%s%n%n%b", self._in_history(folder, sha), "--", folder)
+
+    def revert(self, project: str, sha: str) -> None:
+        """Undo the changes one commit made to the project, keeping everything after it."""
+        folder = clean_name(project, "project")
+        sha = self._in_history(folder, sha)
+        diff = self._git("diff", f"{sha}^", sha, "--", folder)
         if not diff.strip():
-            raise NoteError(f"Commit {sha[:7]} did not change {path}")
+            raise NoteError(f"Commit {sha[:7]} did not change {project}")
         try:
             self._git("apply", "-R", "--whitespace=nowarn", "-", stdin=diff)
         except NoteError as error:
             raise NoteError(
-                f"Could not cleanly revert {sha[:7]}: later edits changed the same lines. "
-                "Use git_restore to an earlier commit, or edit the note directly."
+                f"Could not cleanly revert {sha[:7]}: later edits changed the same lines. Restore an earlier version instead."
             ) from error
-        if not self._file(path).exists():
-            self.write(path, "")
 
-    def restore(self, path: str, sha: str) -> None:
-        """Set the note back to exactly how it was at a commit."""
-        path = self.normalise(path)
-        sha = self._verify(sha)
-        try:
-            content = self._git("show", f"{sha}:{path}")
-        except NoteError as error:
-            raise NoteError(f"{path} did not exist at commit {sha[:7]}") from error
-        self.write(path, content)
+    def restore(self, project: str, sha: str) -> None:
+        """Set the whole project (every note, and the tabs) back to exactly how it was at a commit."""
+        folder = clean_name(project, "project")
+        sha = self._in_history(folder, sha)
+        with self._lock:
+            then = set(self._git("ls-tree", "-r", "--name-only", sha, "--", folder).split())
+            if not any(name.endswith(".md") for name in then):
+                raise NoteError(f"{project} had no notes at commit {sha[:7]}")
+            for file in self._dir(project).iterdir():
+                if file.is_file() and f"{folder}/{file.name}" not in then:
+                    file.unlink()
+            self._git("checkout", sha, "--", folder)
 
     def _verify(self, sha: str) -> str:
         try:

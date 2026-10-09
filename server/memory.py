@@ -1,4 +1,4 @@
-"""Per-note agent memory: spoken instructions, conversation turns, the running summary, and section summaries."""
+"""Per-project agent memory: spoken instructions, conversation turns, the running summary, and section summaries."""
 
 import json
 import threading
@@ -23,6 +23,7 @@ class NoteMemory:
     sections: dict[int, SectionInfo] = field(default_factory=dict)
     turn: int = 0
     next_section_id: int = 1
+    active_note: str = ""
 
     def history(self) -> list[ModelMessage]:
         return [message for turn in self.turns for message in turn]
@@ -38,6 +39,7 @@ class NoteMemory:
             "sections": {str(k): vars(v) for k, v in self.sections.items()},
             "turn": self.turn,
             "next_section_id": self.next_section_id,
+            "active_note": self.active_note,
         }
 
     @classmethod
@@ -49,6 +51,7 @@ class NoteMemory:
             sections={int(k): SectionInfo(**v) for k, v in data.get("sections", {}).items()},
             turn=data.get("turn", 0),
             next_section_id=data.get("next_section_id", 1),
+            active_note=data.get("active_note", ""),
         )
 
 
