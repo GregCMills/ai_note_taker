@@ -155,7 +155,7 @@ Notes are split into sections whose ids are unique across the whole project. In 
 - To move text, add it in its new place and remove it from the old one in the same turn; to move a whole section, use move_section. Never delete and recreate a note to change something inside it.
 - Leave no empty or duplicate headings behind.
 - In stories, record what the story says. A word spoken in dialogue is not a character's name unless the story uses it as one.
-- Every line of text is shown with its line number, like "[23] It was raining.". The user sees the same numbers beside the note, counted per note, so "line 23", "text 23" or "number 23" means that line of the note they are looking at (the active one) unless they name another. The numbers are not part of the text: never write them in old_text, new_text or anything else.
+- Every line of text is shown with its line number, like "[23] It was raining.". The user sees the same numbers beside the note, counted per note, so "line 23", "text 23" or "number 23" means that line of the note they are looking at (the active one) unless they name another. To delete numbered lines, call delete_lines once with all of them. The numbers are not part of the text: never write them in old_text, new_text or anything else.
 - Keep old_text short: just the words being changed, enough to be unique, never the whole section. To add to the end of a section, use its last sentence or line as old_text and repeat it in new_text followed by the addition.
 - Make one edit per section that needs changing, including sections the user's instructions ask you to keep up to date. When a tool replies OK that change is done: go on to the next change or reply, and never send the same call twice. Each reply lists the notes and sections as they are now.
 - Never invent content the user did not say.
@@ -440,6 +440,9 @@ class NoteAgents:
                 if not deps.actions and deps.failure_messages:
                     # The model sometimes claims success after failed edits; report what actually happened.
                     summary = f"couldn't make that change ({sorted(deps.failure_messages)[0][:120]})"
+                elif deps.actions and summary.lower().strip(" .") in ("", "no change"):
+                    # ...and sometimes says "no change" after changes it did make.
+                    summary = "; ".join(deps.actions)
                 turn = result.new_messages()
             except (UsageLimitExceeded, StopTurn, UnexpectedModelBehavior) as stopped:
                 log.warning("Scribe stopped early on %s: %s", project, stopped)
@@ -646,6 +649,35 @@ class NoteAgents:
                 section.text = section.text.replace(old_text, new_text, 1)
             await self._save(deps, [note], note, f"edit §{section_id}", [section_id])
             return f"OK.{dropped_warning(old_text, new_text)} {deps.outline()}"
+
+        @scribe.tool
+        async def delete_lines(ctx: RunContext[ScribeDeps], lines: list[int], note: str | None = None) -> str:
+            """Delete whole lines by their line numbers. Pass every line to delete in one call.
+
+            Args:
+                lines: The line numbers to delete, as shown in the latest notes (e.g. [38, 39, 40]).
+                note: The note they are in. Omit for the active note.
+            """
+            deps = ctx.deps
+            target = deps.match_note(note) if note else deps.active
+            if target is None:
+                return deps.fail(f'no note "{note}"')
+            if refused := deps.repeated("delete_lines", target, tuple(sorted(lines))):
+                return refused
+            doc = deps.docs[target]
+            removed = doc.delete_lines(set(lines))
+            if not removed:
+                return deps.fail(f"note \"{target}\" has no line {', '.join(map(str, lines))}")
+            touched = sorted({s.id for _, s, _ in removed if s.id is not None})
+            for section_id in touched:
+                deps.collapsed.pop(section_id, None)
+            listed = "; ".join(f'{n}: "{text[:60]}"' for n, _, text in removed)
+            missing = sorted(set(lines) - {n for n, _, _ in removed})
+            await self._save(deps, [target], target, f"deleted line {', '.join(str(n) for n, _, _ in removed)}", [
+                s.id for s in doc.sections if s.id in touched
+            ])
+            note_missing = f" There was no line {', '.join(map(str, missing))}." if missing else ""
+            return f"OK, deleted {listed}.{note_missing} Lines after these are now numbered lower. {deps.outline()}"
 
         @scribe.tool
         async def insert_text(ctx: RunContext[ScribeDeps], section_id: int, after_text: str, text: str) -> str:

@@ -142,6 +142,23 @@ class Document:
         """The line number of the section's first line of text."""
         return 1 + sum(count_lines(s.text) for s in self.sections[: self.sections.index(section)])
 
+    def delete_lines(self, numbers: set[int]) -> list[tuple[int, Section, str]]:
+        """Remove the numbered lines, dropping sections left empty. Returns (number, section, text) per line removed."""
+        removed, line = [], 1
+        for section in self.sections:
+            kept = []
+            for row in section.text.split("\n"):
+                if row.strip():
+                    if line in numbers:
+                        removed.append((line, section, row.strip()))
+                        row = None
+                    line += 1
+                if row is not None:
+                    kept.append(row)
+            section.text = re.sub(r"\n\s*\n(\s*\n)+", "\n\n", "\n".join(kept)).strip("\n")
+        self.sections = [s for s in self.sections if s.text.strip()]
+        return removed
+
     def render(self, collapsed: dict[int, Collapse]) -> str:
         """The scribe's view, with line numbers: full sections, or summaries (of all or the top part of a section) for
         ids in `collapsed`."""
