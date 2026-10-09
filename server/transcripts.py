@@ -60,6 +60,22 @@ class TranscriptStore:
             done = [s for s in self._load(path) if s["status"] == "done"]
             return [dict(s) for s in done[-limit:]]
 
+    def fail_unfinished(self) -> int:
+        """Mark speech still waiting for the agent as failed. Called at startup: anything pending then belonged to
+        a turn that was cut off by a restart and will never finish. Returns how many segments were marked."""
+        count = 0
+        with self._lock:
+            for file in self.root.glob("**/*.jsonl"):
+                path = file.relative_to(self.root).as_posix().removesuffix(".jsonl")
+                segments = self._load(path)
+                stuck = [s for s in segments if s["status"] == "pending"]
+                for segment in stuck:
+                    segment["status"] = "error"
+                if stuck:
+                    self._save(path)
+                    count += len(stuck)
+        return count
+
     def rename(self, old: str, new: str) -> None:
         with self._lock:
             self._cache.pop(old, None)

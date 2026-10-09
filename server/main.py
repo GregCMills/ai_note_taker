@@ -387,6 +387,8 @@ async def load_whisper() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if stuck := transcripts.fail_unfinished():
+        log.warning("Marked %d segments from interrupted turns as failed", stuck)
     loader = asyncio.create_task(load_whisper())
     yield
     loader.cancel()
