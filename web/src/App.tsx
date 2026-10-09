@@ -229,7 +229,8 @@ export const App = () => {
 
   useEffect(() => {
     send({ type: 'subscribe', project: current })
-    if (recordingRef.current && current) send({ type: 'start', project: current })
+    // Keep recording when the view changes: with no project open, speech goes to the project manager.
+    if (recordingRef.current) send({ type: 'start', project: current })
   }, [current, send])
 
   // Tell the server which tab is in view, so speech like "add this here" lands in that note.

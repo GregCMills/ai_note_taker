@@ -69,12 +69,13 @@ class ManagerDeps:
     hooks: ManagerHooks
     origin: str | None  # the project the user is in, if any
     actions: list[str] = field(default_factory=list)
-    failures: int = 0
+    failure_messages: set[str] = field(default_factory=set)
     calls: set[tuple] = field(default_factory=set)
 
     def fail(self, message: str) -> str:
-        self.failures += 1
-        if self.failures >= MAX_TOOL_FAILURES:
+        # Count distinct problems: several calls sent at once that hit the same error are one mistake, not many.
+        self.failure_messages.add(message)
+        if len(self.failure_messages) >= MAX_TOOL_FAILURES:
             raise StopTurn(message)
         return f"Error: {message}"
 

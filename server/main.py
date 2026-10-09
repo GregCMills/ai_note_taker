@@ -239,6 +239,10 @@ class ProjectSession:
 
     async def _process(self, batch: list[dict]) -> None:
         project, ids = self.project, [s["id"] for s in batch]
+        if not notes.project_exists(project):
+            # e.g. still recording into a project that was just deleted.
+            await hub.send(project, {"type": "agent", "state": "error", "message": f'"{project}" no longer exists, so that speech was not added'})
+            return
         await hub.send(project, {"type": "agent", "state": "working", "segments": ids})
         STATUS.set(report_status_to(project))
         for attempt in range(3):

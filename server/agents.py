@@ -213,7 +213,7 @@ class ScribeDeps:
     system_prompt: str
     hooks: UiHooks
     actions: list[str] = field(default_factory=list)
-    failures: int = 0
+    failure_messages: set[str] = field(default_factory=set)
     calls: set[tuple] = field(default_factory=set)
     manager_requests: list[str] = field(default_factory=list)
 
@@ -237,8 +237,9 @@ class ScribeDeps:
         return f"Notes now: {notes}"
 
     def fail(self, message: str) -> str:
-        self.failures += 1
-        if self.failures >= MAX_TOOL_FAILURES:
+        # Count distinct problems: several calls sent at once that hit the same error are one mistake, not many.
+        self.failure_messages.add(message)
+        if len(self.failure_messages) >= MAX_TOOL_FAILURES:
             raise StopTurn(message)
         return f"Error: {message}. {self.outline()}"
 
@@ -300,6 +301,8 @@ class NoteAgents:
         memory = self.memories.load(project)
         memory.turn += 1
         docs = self._load_project(project, memory)
+        if not docs:
+            raise NoteError(f'Project "{project}" has no notes (was it deleted?)')
         active = next(n for n in (viewing, memory.active_note, *docs) if n in docs)
 
         await self._compact_history(memory)
@@ -570,7 +573,9 @@ class NoteAgents:
                 return f"OK. {deps.outline()}"
 
             anchor = deps.find(after_section_id) if after_section_id else None
-            if after_section_id and anchor is None:
+            # A wrong anchor is harmless when the note is named (e.g. "after §1" in an empty note): add it there.
+            misplaced = bool(after_section_id and anchor is None and note and deps.match_note(note))
+            if after_section_id and anchor is None and not misplaced:
                 return deps.fail(f"no section {after_section_id}")
             target = anchor[0] if anchor else (deps.match_note(note) if note else deps.active)
             if target is None:
@@ -590,7 +595,8 @@ class NoteAgents:
             position = doc.sections.index(anchor[1]) + 1 if anchor else (0 if after_section_id == 0 else len(doc.sections))
             doc.sections.insert(position, Section(None, content))
             await self._save(deps, [target], target, "add", [])
-            return f"OK, added. {deps.outline()}"
+            where = f' (there is no section {after_section_id}, so it went at the end of "{target}")' if misplaced else ""
+            return f"OK, added{where}. {deps.outline()}"
 
         @scribe.tool
         async def move_section(
