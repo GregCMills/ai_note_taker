@@ -26,6 +26,7 @@ from .agents import (
     describe_commit,
     describe_turn,
     report,
+    since_prompt,
     stream_status,
     turn_limits,
 )
@@ -151,7 +152,7 @@ class ProjectManager:
             except (UsageLimitExceeded, StopTurn, IncompleteToolCall) as stopped:
                 log.warning("Project manager stopped early: %s", stopped)
                 reply = "; ".join(deps.actions) or "Sorry, I couldn't do that."
-                turn = [*messages[len(history):], ModelResponse(parts=[TextPart(reply)])]
+                turn = [*since_prompt(messages, prompt, len(history)), ModelResponse(parts=[TextPart(reply)])]
         memory.turns.append(compact_turn(turn, request))
         memories.save(MANAGER_SCOPE, memory)
 

@@ -96,6 +96,9 @@ services:
       LD_LIBRARY_PATH: /opt/conda/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cudnn/lib
       LLM_URL: http://llm:8080/v1
       LLM_API_KEY: ${LLM_API_KEY:-test}
+      # Speech-to-text: "granite" (IBM Granite Speech 4.1 2B) or "whisper" (faster-whisper large-v3-turbo).
+      ASR_ENGINE: granite
+      GRANITE_MODEL: ibm-granite/granite-speech-4.1-2b
       WHISPER_MODEL: large-v3-turbo
       WHISPER_LANGUAGE: en
       # Add this machine's LAN IP / hostname so they appear in the self-signed certificate.

@@ -47,7 +47,8 @@ from .sections import Collapse, Document, Section, estimate_tokens, number_secti
 
 log = logging.getLogger(__name__)
 
-MAX_TOOL_FAILURES = 3
+# Distinct mistakes allowed per turn before it is ended. The model often recovers after two.
+MAX_TOOL_FAILURES = 4
 # Rewriting a section at least this long down to under half its size is refused: it is almost always the model
 # sending only the changed sentence, which would silently delete the rest.
 SHRINK_GUARD_WORDS = 80
@@ -91,6 +92,18 @@ def record_subrun(agent: str, purpose: str, result, started: float) -> None:
             {"agent": agent, "purpose": purpose, "seconds": round(time.monotonic() - started, 2),
              "messages": slim_messages(result.all_messages())}
         )
+
+
+def since_prompt(messages: list[ModelMessage], prompt: str, history_length: int) -> list[ModelMessage]:
+    """The messages of the current turn, from a capture that may also hold (possibly trimmed) history: everything
+    from the request carrying this turn's prompt. Falls back to slicing off the history."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, ModelRequest) and any(
+            isinstance(part, UserPromptPart) and part.content == prompt for part in message.parts
+        ):
+            return messages[index:]
+    return messages[history_length:]
 
 
 def turn_limits(requests: int = config.LLM_MAX_STEPS) -> UsageLimits:
@@ -391,7 +404,7 @@ class NoteAgents:
             except (UsageLimitExceeded, StopTurn, IncompleteToolCall) as stopped:
                 log.warning("Scribe stopped early on %s: %s", project, stopped)
                 summary = "; ".join(deps.actions) or "stopped: could not make that change"
-                turn = [*messages[len(history):], ModelResponse(parts=[TextPart(summary)])]
+                turn = [*since_prompt(messages, prompt, len(history)), ModelResponse(parts=[TextPart(summary)])]
         memory.turns.append(compact_turn(turn, speech))
         memory.active_note = deps.active
 
@@ -582,6 +595,11 @@ class NoteAgents:
                     f"old_text appears {count} times in section {section_id}; include a few more words around it so it is unique"
                 )
             elif count == 0:
+                if new_text.strip() and new_text.strip() in section.text:
+                    return deps.fail(
+                        f"old_text is not in section {section_id}, but new_text already is: the change may already be "
+                        "made, or old_text and new_text are swapped. old_text must be the text as it is now"
+                    )
                 return deps.fail(f"old_text is not in section {section_id}; copy it exactly from the section")
             else:
                 section.text = section.text.replace(old_text, new_text, 1)
