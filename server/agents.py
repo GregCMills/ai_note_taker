@@ -109,7 +109,7 @@ You keep the notes for one project. A project has one or more notes, which the u
 
 Notes are split into sections whose ids are unique across the whole project. In a long project, sections near the top of a note may be shown as a summary, either whole ("collapsed") or just their earlier part ("partly-collapsed", with the end still shown word for word). Call open_section to read the full text before changing summarised text.
 
-- Change notes only with tools: edit_section for small changes, write_section to add, rewrite or delete a whole section, move_section to reorder or move a section into another note, manage_note to create, rename, delete or switch to (open) a note.
+- Change notes only with tools: insert_text to add text inside a section without removing anything, edit_section to change or remove text, write_section to add, rewrite or delete a whole section, move_section to reorder or move a section into another note, manage_note to create, rename, delete or switch to (open) a note.
 - New sections go in the active note unless the user names another note or the content plainly belongs in an existing one.
 - Create a new note when the user asks for one (a new note, page or tab), or when their instructions say how to split things into notes.
 - A section is one heading plus its content. When adding a section, write only that section: never repeat a note's title or other sections.
@@ -250,6 +250,33 @@ class ScribeDeps:
             return self.fail("that exact change was already made this turn; it is done, so stop and reply")
         self.calls.add(call)
         return None
+
+
+SENTENCE = re.compile(r"[^.!?\n]+[.!?]+[\"'”’)]*|[^\n]+$", re.MULTILINE)
+
+
+def dropped_warning(old_text: str, new_text: str) -> str:
+    """Name the sentences an edit removed when it also kept others, which usually means a forgotten anchor.
+
+    Not an error: replacing or deleting text on purpose is normal. It just lets the scribe notice and fix a slip.
+    """
+    sentences = [m.group(0).strip() for m in SENTENCE.finditer(old_text) if len(m.group(0).split()) >= 4]
+    new_words = set(re.findall(r"\w+", new_text.lower()))
+
+    def survives(sentence: str) -> bool:
+        # Reworded counts as kept: only flag a sentence whose words have mostly disappeared.
+        words = set(re.findall(r"\w+", sentence.lower()))
+        return sentence in new_text or len(words & new_words) >= 0.6 * len(words)
+
+    kept = [s for s in sentences if survives(s)]
+    dropped = [s for s in sentences if not survives(s)]
+    if not kept or not dropped:
+        return ""
+    quoted = "; ".join(f'"{s[:80]}"' for s in dropped[:3])
+    return (
+        f" Note: these sentences from old_text are no longer in the section: {quoted}. If that was not intended, "
+        "put them back (and use insert_text to add text without removing any)."
+    )
 
 
 def drop_empty_twins(doc: Document) -> None:
@@ -534,7 +561,44 @@ class NoteAgents:
             else:
                 section.text = section.text.replace(old_text, new_text, 1)
             await self._save(deps, [note], note, f"edit §{section_id}", [section_id])
-            return f"OK. {deps.outline()}"
+            return f"OK.{dropped_warning(old_text, new_text)} {deps.outline()}"
+
+        @scribe.tool
+        async def insert_text(ctx: RunContext[ScribeDeps], section_id: int, after_text: str, text: str) -> str:
+            """Insert new text into a section right after some existing text, without removing anything.
+            Use this to add a sentence or paragraph in the middle or at the end of a section.
+
+            Args:
+                section_id: The section to add to.
+                after_text: Exact existing text (a few words to a sentence) that the new text should follow.
+                text: The text to insert. It goes on a new line (a new paragraph) if after_text ends a line.
+            """
+            deps = ctx.deps
+            if refused := deps.repeated("insert", section_id, after_text, text):
+                return refused
+            found = deps.find(section_id)
+            if found is None:
+                return deps.fail(f"no section {section_id}")
+            note, section = found
+            fold = deps.collapsed.get(section_id)
+            if fold is not None and fold.keep_from is None:
+                return deps.fail(f"section {section_id} is collapsed; call open_section({section_id}) first")
+            anchor = after_text.strip()
+            count = section.text.count(anchor) if anchor else 0
+            if count == 0:
+                return deps.fail(f"after_text is not in section {section_id}; copy a few words exactly from the section")
+            if count > 1 and not section.text.rstrip().endswith(anchor):
+                return deps.fail(f"after_text appears {count} times in section {section_id}; include a few more words so it is unique")
+            # With repeats, quoting the section's closing words means "at the end".
+            cut = (section.text.rfind(anchor) if count > 1 else section.text.find(anchor)) + len(anchor)
+            rest = section.text[cut:]
+            if not rest.strip() or rest.lstrip(" \t").startswith("\n"):
+                # The anchor ends a line: the new text becomes its own paragraph.
+                section.text = section.text[:cut] + "\n\n" + text.strip() + rest
+            else:
+                section.text = section.text[:cut] + " " + text.strip() + rest
+            await self._save(deps, [note], note, f"insert into §{section_id}", [section_id])
+            return f"OK, inserted. {deps.outline()}"
 
         @scribe.tool
         async def write_section(
