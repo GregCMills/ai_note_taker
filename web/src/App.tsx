@@ -379,15 +379,6 @@ export const App = () => {
         </div>
         <span className={`dot ${statusClass}`} aria-label={allReady ? 'All systems ready' : 'Not ready'} />
         <AgentButton agent={agent} step={agentStep} onClick={() => setInspectorOpen(true)} />
-        {fullscreen.supported && (
-          <button
-            className="icon-button"
-            onClick={fullscreen.toggle}
-            aria-label={fullscreen.active ? 'Exit full screen' : 'Full screen'}
-          >
-            {fullscreen.active ? <CollapseIcon size={22} /> : <ExpandIcon size={22} />}
-          </button>
-        )}
         <button className="icon-button" onClick={() => setMenuOpen(true)} aria-label="Project options">
           <MoreIcon />
         </button>
@@ -459,22 +450,7 @@ export const App = () => {
       </div>
 
       <footer className="mic-bar">
-        <button className={`bar-button ${view === 'history' ? 'active' : ''}`} onClick={() => toggleView('history')}>
-          <HistoryIcon />
-          <span>History</span>
-        </button>
-        <button
-          className={`mic-button ${recording ? 'recording' : ''}`}
-          onClick={toggleRecording}
-          aria-label={recording ? 'Stop recording' : 'Start recording'}
-        >
-          {recording ? <StopIcon size={26} /> : <MicIcon size={26} />}
-        </button>
         <div className="bar-group">
-          <button className={`bar-button ${view === 'transcript' ? 'active' : ''}`} onClick={() => toggleView('transcript')}>
-            <TranscriptIcon />
-            <span>Transcript</span>
-          </button>
           {current && (
             <button
               className={`bar-button ${editing ? 'active' : ''}`}
@@ -486,6 +462,29 @@ export const App = () => {
             >
               <PencilIcon />
               <span>Edit</span>
+            </button>
+          )}
+          <button className={`bar-button panel-toggle ${view === 'history' ? 'active' : ''}`} onClick={() => toggleView('history')}>
+            <HistoryIcon />
+            <span>History</span>
+          </button>
+        </div>
+        <button
+          className={`mic-button ${recording ? 'recording' : ''}`}
+          onClick={toggleRecording}
+          aria-label={recording ? 'Stop recording' : 'Start recording'}
+        >
+          {recording ? <StopIcon size={26} /> : <MicIcon size={26} />}
+        </button>
+        <div className="bar-group">
+          <button className={`bar-button panel-toggle ${view === 'transcript' ? 'active' : ''}`} onClick={() => toggleView('transcript')}>
+            <TranscriptIcon />
+            <span>Transcript</span>
+          </button>
+          {fullscreen.supported && (
+            <button className={`bar-button ${fullscreen.active ? 'active' : ''}`} onClick={fullscreen.toggle}>
+              {fullscreen.active ? <CollapseIcon /> : <ExpandIcon />}
+              <span>{fullscreen.active ? 'Exit full' : 'Full screen'}</span>
             </button>
           )}
         </div>

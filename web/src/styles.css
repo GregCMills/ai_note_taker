@@ -1410,7 +1410,7 @@ textarea.editor {
 
 @media (min-width: 900px) {
   .menu-button,
-  .bar-button,
+  .bar-button.panel-toggle,
   .sheet-close,
   .side-backdrop {
     display: none;
@@ -1451,10 +1451,6 @@ textarea.editor {
     border-top: 1px solid var(--border);
   }
 
-  .mic-bar {
-    grid-template-columns: 1fr;
-    justify-items: center;
-  }
 
   .dialog-backdrop {
     align-items: center;

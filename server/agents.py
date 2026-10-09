@@ -165,6 +165,13 @@ def describe_turn(turn: list[ModelMessage]) -> str:
     return "\n".join(lines)
 
 
+# Tool calls whose arguments stay whole in the saved history: the model re-uses them (e.g. merging instructions)
+# and once copied a shortened version, marker and all, into the user's instructions.
+KEEP_ARGS_WHOLE = {"set_instructions"}
+# The marker `_shorten` leaves in history. Text containing it was copied from history, not written.
+SHORTENED = re.compile(r"… \(\d+ chars\)")
+
+
 def _shorten(value, limit: int):
     if isinstance(value, str) and len(value) > limit:
         return f"{value[: limit // 2]}… ({len(value)} chars)"
@@ -187,7 +194,7 @@ def compact_turn(messages: list[ModelMessage], speech: str) -> list[ModelMessage
         elif isinstance(message, ModelResponse):
             parts = []
             for part in message.parts:
-                if isinstance(part, ToolCallPart):
+                if isinstance(part, ToolCallPart) and part.tool_name not in KEEP_ARGS_WHOLE:
                     part = replace(part, args={k: _shorten(v, 240) for k, v in part.args_as_dict().items()})
                     parts.append(part)
                 elif isinstance(part, TextPart):
@@ -243,6 +250,15 @@ class ScribeDeps:
         if len(self.failure_messages) >= MAX_TOOL_FAILURES:
             raise StopTurn(message)
         return f"Error: {message}. {self.outline()}"
+
+    def copied_shortened(self, *texts: str | None) -> str | None:
+        """Refuse text copied from a shortened history entry ("… (402 chars)"), which would save it truncated."""
+        if any(text and SHORTENED.search(text) for text in texts):
+            return self.fail(
+                'that text contains "… (N chars)", which marks a shortened copy from your history. Write out the '
+                "full text instead (the current notes and instructions are shown in full in the latest message)"
+            )
+        return None
 
     def repeated(self, *call) -> str | None:
         """Refuse an edit identical to one already made this turn (the model sometimes loops on success)."""
@@ -526,7 +542,7 @@ class NoteAgents:
                 new_text: Replacement text.
             """
             deps = ctx.deps
-            if refused := deps.repeated("edit", section_id, old_text, new_text):
+            if refused := deps.copied_shortened(new_text) or deps.repeated("edit", section_id, old_text, new_text):
                 return refused
             if old_text == new_text:
                 return deps.fail("new_text is the same as old_text, so that edit changes nothing")
@@ -574,7 +590,7 @@ class NoteAgents:
                 text: The text to insert. It goes on a new line (a new paragraph) if after_text ends a line.
             """
             deps = ctx.deps
-            if refused := deps.repeated("insert", section_id, after_text, text):
+            if refused := deps.copied_shortened(text) or deps.repeated("insert", section_id, after_text, text):
                 return refused
             found = deps.find(section_id)
             if found is None:
@@ -617,7 +633,7 @@ class NoteAgents:
                 note: Which note to add a new section to. Omit for the active note.
             """
             deps = ctx.deps
-            if refused := deps.repeated("write", content, section_id, after_section_id, note):
+            if refused := deps.copied_shortened(content) or deps.repeated("write", content, section_id, after_section_id, note):
                 return refused
             if section_id is not None:
                 found = deps.find(section_id)
@@ -775,6 +791,8 @@ class NoteAgents:
             Args:
                 instructions: The complete instructions to remember.
             """
+            if refused := ctx.deps.copied_shortened(instructions):
+                return refused
             ctx.deps.memory.instructions = instructions.strip()
             ctx.deps.actions.append("set instructions")
             return "OK, saved"
