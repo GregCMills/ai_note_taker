@@ -11,9 +11,8 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from pydantic_ai import Agent, RunContext, capture_run_messages
-from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.exceptions import IncompleteToolCall, UsageLimitExceeded
 from pydantic_ai.messages import ModelResponse, TextPart
-from pydantic_ai.usage import UsageLimits
 
 from . import config
 from .agentlog import slim_messages
@@ -28,6 +27,7 @@ from .agents import (
     describe_turn,
     report,
     stream_status,
+    turn_limits,
 )
 from .notes import NoteError
 from .sections import estimate_tokens
@@ -143,12 +143,12 @@ class ProjectManager:
                     deps=deps,
                     message_history=history,
                     instructions=instructions,
-                    usage_limits=UsageLimits(request_limit=config.LLM_MAX_STEPS),
+                    usage_limits=turn_limits(),
                     event_stream_handler=stream_status,
                 )
                 reply = next(iter(CONTROL_TOKEN.sub("", result.output).strip().splitlines()), "")
                 turn = result.new_messages()
-            except (UsageLimitExceeded, StopTurn) as stopped:
+            except (UsageLimitExceeded, StopTurn, IncompleteToolCall) as stopped:
                 log.warning("Project manager stopped early: %s", stopped)
                 reply = "; ".join(deps.actions) or "Sorry, I couldn't do that."
                 turn = [*messages[len(history):], ModelResponse(parts=[TextPart(reply)])]

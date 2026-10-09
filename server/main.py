@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from . import config
 from .agentlog import AgentLog
 from .agents import STATUS, NoteAgents, UiHooks, describe_turn
-from .audio import SAMPLE_RATE, Segmenter, Transcriber
+from .audio import SAMPLE_RATE, Segmenter, make_transcriber
 from .hub import Hub
 from .manager import MANAGER_SCOPE, ManagerHooks, ProjectManager
 from .memory import MemoryStore
@@ -36,10 +36,16 @@ memories = MemoryStore(config.DATA_DIR / "memory")
 activity = AgentLog(config.DATA_DIR / "agentlog")
 agents = NoteAgents(notes, memories, activity)
 manager = ProjectManager(agents)
-transcriber = Transcriber(
-    config.WHISPER_MODEL, config.WHISPER_DEVICE, config.WHISPER_COMPUTE_TYPE, config.WHISPER_LANGUAGE
+transcriber = make_transcriber(
+    config.ASR_ENGINE,
+    granite_model=config.GRANITE_MODEL,
+    whisper_model=config.WHISPER_MODEL,
+    device=config.WHISPER_DEVICE,
+    compute_type=config.WHISPER_COMPUTE_TYPE,
+    language=config.WHISPER_LANGUAGE,
 )
-whisper_state = {"state": "loading", "error": None}
+# Reported to the UI as "whisper" for compatibility; it is whichever speech-to-text engine is configured.
+whisper_state = {"state": "loading", "error": None, "engine": config.ASR_ENGINE}
 
 
 viewing: dict[str, str] = {}  # project -> the note (tab) the user last looked at
@@ -373,7 +379,7 @@ async def load_whisper() -> None:
     try:
         await asyncio.to_thread(transcriber.load)
         whisper_state["state"] = "ready"
-        log.info("Whisper model loaded")
+        log.info("Speech-to-text model loaded (%s)", config.ASR_ENGINE)
     except Exception as error:
         log.exception("Whisper failed to load")
         whisper_state.update(state="error", error=str(error))

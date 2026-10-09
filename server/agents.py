@@ -21,7 +21,7 @@ from dataclasses import dataclass, field, replace
 from typing import Awaitable, Callable, Literal
 
 from pydantic_ai import Agent, RunContext, capture_run_messages
-from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.exceptions import IncompleteToolCall, UsageLimitExceeded
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -91,6 +91,11 @@ def record_subrun(agent: str, purpose: str, result, started: float) -> None:
             {"agent": agent, "purpose": purpose, "seconds": round(time.monotonic() - started, 2),
              "messages": slim_messages(result.all_messages())}
         )
+
+
+def turn_limits(requests: int = config.LLM_MAX_STEPS) -> UsageLimits:
+    """Per-turn limits: how many model calls, and how many tokens they may generate in total."""
+    return UsageLimits(request_limit=requests, output_tokens_limit=config.LLM_TURN_OUTPUT_TOKENS)
 
 
 def scribe_instructions(system_prompt: str, memory: NoteMemory) -> str:
@@ -327,10 +332,14 @@ class NoteAgents:
             config.LLM_MODEL,
             provider=OpenAIProvider(base_url=config.LLM_URL, api_key=config.LLM_API_KEY or "none"),
         )
-        self.settings = ModelSettings(temperature=config.LLM_TEMPERATURE)
+        self.settings = ModelSettings(temperature=config.LLM_TEMPERATURE, max_tokens=config.LLM_MAX_TOKENS)
         self.scribe = self._build_scribe()
         self.historian = self._build_historian()
-        self.librarian = Agent(self.model, instructions=LIBRARIAN_INSTRUCTIONS, model_settings=self.settings)
+        self.librarian = Agent(
+            self.model,
+            instructions=LIBRARIAN_INSTRUCTIONS,
+            model_settings=ModelSettings(temperature=config.LLM_TEMPERATURE, max_tokens=config.LIBRARIAN_MAX_TOKENS),
+        )
 
     async def process(
         self, project: str, segments: list[dict], system_prompt: str, hooks: UiHooks, viewing: str | None = None
@@ -373,13 +382,13 @@ class NoteAgents:
                     prompt,
                     deps=deps,
                     message_history=history,
-                    usage_limits=UsageLimits(request_limit=config.LLM_MAX_STEPS),
+                    usage_limits=turn_limits(),
                     event_stream_handler=stream_status,
                 )
                 # Only the first line: the model sometimes echoes the whole note after its summary.
                 summary = next(iter(CONTROL_TOKEN.sub("", result.output).strip().splitlines()), "")
                 turn = result.new_messages()
-            except (UsageLimitExceeded, StopTurn) as stopped:
+            except (UsageLimitExceeded, StopTurn, IncompleteToolCall) as stopped:
                 log.warning("Scribe stopped early on %s: %s", project, stopped)
                 summary = "; ".join(deps.actions) or "stopped: could not make that change"
                 turn = [*messages[len(history):], ModelResponse(parts=[TextPart(summary)])]
@@ -811,7 +820,7 @@ class NoteAgents:
             result = await self.historian.run(
                 f"Request: {request}\n\nRecent commits (newest first):\n{commits}",
                 deps=historian,
-                usage_limits=UsageLimits(request_limit=6),
+                usage_limits=turn_limits(requests=6),
                 event_stream_handler=stream_status,
             )
             record_subrun("historian", request, result, started)

@@ -102,3 +102,62 @@ class Transcriber:
         if text.lower().strip(" .!?,") in HALLUCINATIONS:
             return ""
         return text
+
+
+GRANITE_PROMPT = "<|audio|>transcribe the speech with proper punctuation and capitalization."
+
+
+class GraniteTranscriber:
+    """IBM Granite Speech (a speech-to-text LLM) with the same interface as `Transcriber`.
+
+    More accurate than Whisper on the Open ASR Leaderboard. Its decoder writes the transcript token by token, so
+    long audio costs more than with Whisper; segments here are short (one pause to the next).
+    """
+
+    def __init__(self, model: str, device: str):
+        self._name = model
+        self._device = device
+        self._model = None
+        self._processor = None
+        self._lock = threading.Lock()
+
+    def load(self) -> None:
+        with self._lock:
+            if self._model is not None:
+                return
+            import torch
+            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+            self._processor = AutoProcessor.from_pretrained(self._name)
+            self._model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                self._name, device_map=self._device, torch_dtype=torch.bfloat16
+            )
+
+    def transcribe(self, audio: np.ndarray, previous_text: str = "", fast: bool = False) -> str:
+        import torch
+
+        self.load()
+        tokenizer = self._processor.tokenizer
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": GRANITE_PROMPT}], tokenize=False, add_generation_prompt=True
+        )
+        wav = torch.from_numpy(np.ascontiguousarray(audio, dtype=np.float32)).unsqueeze(0)
+        # Roughly 3 words a second of speech, ~1.5 tokens a word, with headroom.
+        max_tokens = max(48, int(len(audio) / SAMPLE_RATE * 8))
+        with self._lock, torch.inference_mode():
+            inputs = self._processor(prompt, wav, device=self._device, return_tensors="pt").to(self._device)
+            output = self._model.generate(**inputs, max_new_tokens=max_tokens, do_sample=False, num_beams=1)
+        new_tokens = output[0, inputs["input_ids"].shape[-1]:]
+        text = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        if text.lower().strip(" .!?,") in HALLUCINATIONS:
+            return ""
+        return text
+
+
+def make_transcriber(engine: str, *, granite_model: str, whisper_model: str, device: str, compute_type: str,
+                     language: str | None) -> "Transcriber | GraniteTranscriber":
+    if engine == "granite":
+        return GraniteTranscriber(granite_model, device)
+    if engine == "whisper":
+        return Transcriber(whisper_model, device, compute_type, language)
+    raise ValueError(f"Unknown ASR_ENGINE {engine!r}: use 'granite' or 'whisper'")

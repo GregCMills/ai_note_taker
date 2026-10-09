@@ -51,8 +51,14 @@ body,
   margin: 0;
 }
 
+/* "clip" rather than "hidden": hidden still lets code (scrollIntoView) scroll the page, which pushed the whole app
+   up when following an edit near the bottom (the closed sheet below the screen makes the page taller). */
+html,
 body {
-  overflow: hidden;
+  overflow: clip;
+}
+
+body {
   background: var(--bg);
   color: var(--text);
   font: 17px/1.55 system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -163,6 +169,7 @@ html:fullscreen {
   position: relative;
   min-width: 0;
   min-height: 0;
+  overflow: clip;
 }
 
 .pane-note {

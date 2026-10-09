@@ -36,7 +36,7 @@ export type AgentState =
   | { state: 'error'; message: string }
 
 export type Status = {
-  whisper: { state: 'loading' | 'ready' | 'error'; error: string | null }
+  whisper: { state: 'loading' | 'ready' | 'error'; error: string | null; engine?: string }
   llm: 'ready' | 'unavailable'
 }
 

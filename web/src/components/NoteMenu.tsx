@@ -50,7 +50,7 @@ export const NoteMenu = ({ connected, status, hasProject, onEdit, onRename, onPr
         <div className="menu-status">
           <StatusLine label="Server" ok={connected} detail={connected ? 'connected' : 'reconnecting'} />
           <StatusLine
-            label="Whisper"
+            label={`Speech-to-text${status?.whisper.engine ? ` (${status.whisper.engine})` : ''}`}
             ok={status?.whisper.state === 'ready'}
             detail={status?.whisper.error ?? status?.whisper.state ?? 'unknown'}
           />
