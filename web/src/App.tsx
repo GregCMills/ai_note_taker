@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
-import { isAppScroll, markAppScroll } from './appScroll'
 import { AgentButton } from './components/AgentButton'
 import { AgentInspector } from './components/AgentInspector'
 import { HistoryPanel } from './components/HistoryPanel'
@@ -26,9 +25,6 @@ const SUMMARY_VISIBLE_MS = 4000
 const ERROR_VISIBLE_MS = 4000
 // Bottom bar folding while reading: how far to scroll before it moves, how long to ignore scrolls after it has
 // moved, and how much scrollable room a note needs before folding is worth it.
-const BAR_TOGGLE_PX = 50
-const BAR_SETTLE_MS = 400
-const BAR_MIN_ROOM_PX = 400
 const LAST_PROJECT_KEY = 'notetaker:last-project'
 
 const buzz = () => {
@@ -88,9 +84,6 @@ export const App = () => {
   const [activityVersion, setActivityVersion] = useState(0)
   const [agentStep, setAgentStep] = useState<AgentStep | null>(null)
   const [managerData, setManagerData] = useState<ManagerData | null>(null)
-  const [barHidden, setBarHidden] = useState(false)
-  const barScroll = useRef({ last: 0, travel: 0, settleUntil: 0, hidden: false })
-  const agentWorking = useRef(false)
   // Where you were in each note, so switching tabs (including the agent switching back) keeps your place.
   const notePane = useRef<HTMLElement>(null)
   const scrollPositions = useRef(new Map<string, number>())
@@ -351,52 +344,21 @@ export const App = () => {
   const allReady = connected && status?.whisper.state === 'ready' && status.llm === 'ready'
   const statusClass = allReady ? 'ok' : status?.whisper.state === 'loading' ? 'wait' : 'bad'
   const pill = error ?? (agent.state === 'idle' && !summaryVisible ? '' : describeAgent(agent, current !== null))
-  // The bottom bar folds away while scrolling down to read and comes back on scrolling up (never while recording).
-  // Folding it changes the note's height, which nudges the scroll position, so scrolls right after a fold are
-  // ignored and only a deliberate scroll in one direction counts. Otherwise the bar flickers up and down.
-  const hideBarWhileReading = (event: React.UIEvent<HTMLElement>) => {
-    const pane = event.currentTarget
-    if (current && note && !editing) scrollPositions.current.set(`${current}/${note}`, pane.scrollTop)
-    const state = barScroll.current
-    const delta = pane.scrollTop - state.last
-    state.last = pane.scrollTop
-    // Only the user's own scrolling moves the bar: not the app following an edit, and not while the agent works.
-    if (isAppScroll() || agentWorking.current) {
-      state.travel = 0
-      return
-    }
-    const now = performance.now()
-    if (now < state.settleUntil) return
-    const setHidden = (hidden: boolean) => {
-      if (hidden === state.hidden) return
-      state.hidden = hidden
-      state.travel = 0
-      state.settleUntil = now + BAR_SETTLE_MS
-      setBarHidden(hidden)
-    }
-    const room = pane.scrollHeight - pane.clientHeight
-    if (pane.scrollTop < BAR_TOGGLE_PX || room < BAR_MIN_ROOM_PX) {
-      setHidden(false)
-      return
-    }
-    state.travel = Math.sign(delta) === Math.sign(state.travel) ? state.travel + delta : delta
-    if (state.travel > BAR_TOGGLE_PX) setHidden(true)
-    else if (state.travel < -BAR_TOGGLE_PX) setHidden(false)
+  const rememberPlace = (event: React.UIEvent<HTMLElement>) => {
+    if (current && note && !editing) scrollPositions.current.set(`${current}/${note}`, event.currentTarget.scrollTop)
   }
 
   const toggleView = (next: View) => setView((previous) => (previous === next ? 'note' : next))
   const note = tabs.includes(activeNote) ? activeNote : tabs[0]
-  agentWorking.current = agent.state === 'working'
 
   // Back on a note you were reading: return to where you were in it.
   useLayoutEffect(() => {
     if (!notePane.current || !current || !note) return
-    markAppScroll()
     notePane.current.scrollTop = scrollPositions.current.get(`${current}/${note}`) ?? 0
   }, [current, note])
 
   return (
-    <div className={`app ${barHidden && !recording ? 'bar-hidden' : ''}`} data-view={view}>
+    <div className="app" data-view={view}>
       <header className="top-bar">
         <button className="icon-button menu-button" onClick={() => setDrawerOpen(true)} aria-label="All projects">
           <MenuIcon />
@@ -427,7 +389,7 @@ export const App = () => {
         </aside>
         {drawerOpen && <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} />}
 
-        <main className="pane pane-note" ref={notePane} onScroll={hideBarWhileReading}>
+        <main className="pane pane-note" ref={notePane} onScroll={rememberPlace}>
           {current && note ? (
             <>
               <NoteTabs notes={tabs} active={note} onSelect={setActiveNote} />
