@@ -1,0 +1,63 @@
+# Gemma 4 26B-A4B on GPU 1: fast (about 125 tokens/s), less careful with edits.
+#   docker compose -f docker-compose.gemma.yml up -d      then open https://<this-machine's-LAN-IP>:8443
+# Switch models with `docker compose -f <the other file> down` first: both use the same container names.
+name: real_time_note_taker
+include:
+  - compose.app.yml
+services:
+  llm:
+    image: local/llama-cpp-turboquant:server-cuda
+    container_name: notetaker-llm
+    tty: true
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    command:
+      - -hf
+      - unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_XL
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --api-key
+      - ${LLM_API_KEY:-test}
+      - --jinja
+      - -c
+      - "40960"
+      - --parallel
+      - "1"
+      - -ngl
+      - "-1"
+      - -sm
+      - layer
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      - --flash-attn
+      - "on"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - turbo3
+      - --reasoning
+      - "off"
+      - --temp
+      - "0.2"
+      - --top-p
+      - "0.95"
+      - --top-k
+      - "64"
+      - -fit
+      - "off"
+      - --repeat-penalty
+      - "1.05"
+      - --repeat-last-n
+      - "256"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    restart: unless-stopped

@@ -1,0 +1,67 @@
+# Qwen 3.8 27B on GPU 1: slower to generate (about 55 tokens/s) but more careful with edits.
+#   docker compose -f docker-compose.qwen.yml up -d       then open https://<this-machine's-LAN-IP>:8443
+# Switch models with `docker compose -f <the other file> down` first: both use the same container names.
+#
+# Qwen 3.8 is partly recurrent, so llama.cpp can only resume a cached prompt from a checkpoint (each about 200 MB
+# of RAM), made just before the end of a request. The app sends a warm-up request after each turn so that one
+# lands where the next turn's speech starts; these settings keep checkpoints close together and few in number.
+name: real_time_note_taker
+include:
+  - compose.app.yml
+services:
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: notetaker-llm
+    tty: true
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    command:
+      - -hf
+      - unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --api-key
+      - ${LLM_API_KEY:-test}
+      - --jinja
+      - -c
+      - "40960"
+      - --parallel
+      - "1"
+      - -ngl
+      - all
+      - --flash-attn
+      - "on"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      # Text only: skip loading the image encoder.
+      - --no-mmproj
+      - -fit
+      - "off"
+      - --reasoning
+      - "off"
+      - --temp
+      - "0.7"
+      - --top-p
+      - "0.8"
+      - --top-k
+      - "20"
+      - --checkpoint-min-step
+      - "256"
+      - --ctx-checkpoints
+      - "8"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    restart: unless-stopped
