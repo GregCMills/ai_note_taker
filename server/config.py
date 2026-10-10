@@ -19,7 +19,7 @@ LLM_MAX_STEPS = int(_env("LLM_MAX_STEPS", "10"))
 LLM_MAX_TOKENS = int(_env("LLM_MAX_TOKENS", "4096"))
 LLM_TURN_OUTPUT_TOKENS = int(_env("LLM_TURN_OUTPUT_TOKENS", "10000"))
 LIBRARIAN_MAX_TOKENS = int(_env("LIBRARIAN_MAX_TOKENS", "600"))
-# The llama-server context size (-c in docker-compose.yml); shown in the agent inspector.
+# The llama-server context size (-c in docker-compose.gemma.yml / docker-compose.qwen.yml); shown in the agent inspector.
 LLM_CONTEXT = int(_env("LLM_CONTEXT", "40960"))
 
 # Speech-to-text engine: "granite" (IBM Granite Speech, more accurate) or "whisper" (faster-whisper).
