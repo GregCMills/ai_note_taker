@@ -142,6 +142,20 @@ class Document:
         """The line number of the section's first line of text."""
         return 1 + sum(count_lines(s.text) for s in self.sections[: self.sections.index(section)])
 
+    def locate_line(self, number: int) -> tuple[Section, int] | None:
+        """The section holding line `number`, and that line's row in `section.text.split("\\n")`."""
+        line = 1
+        for section in self.sections:
+            for row, text in enumerate(section.text.split("\n")):
+                if text.strip():
+                    if line == number:
+                        return section, row
+                    line += 1
+        return None
+
+    def line_count(self) -> int:
+        return sum(count_lines(s.text) for s in self.sections)
+
     def delete_lines(self, numbers: set[int]) -> list[tuple[int, Section, str]]:
         """Remove the numbered lines, dropping sections left empty. Returns (number, section, text) per line removed."""
         removed, line = [], 1

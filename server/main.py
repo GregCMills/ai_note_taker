@@ -242,6 +242,13 @@ class ProjectSession:
             batch, self._pending = self._pending, []
             async with self.lock:
                 await self._process(batch)
+                if not self._pending and notes.project_exists(self.project):
+                    try:
+                        await agents.tidy(self.project)
+                        if not self._pending:
+                            await agents.warm(self.project, settings.system_prompt, viewing.get(self.project))
+                    except Exception:
+                        log.exception("Tidying %s failed", self.project)
 
     async def _process(self, batch: list[dict]) -> None:
         project, ids = self.project, [s["id"] for s in batch]

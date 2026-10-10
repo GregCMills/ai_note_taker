@@ -392,7 +392,8 @@ export const App = () => {
         <main className="pane pane-note" ref={notePane} onScroll={rememberPlace}>
           {current && note ? (
             <>
-              <NoteTabs notes={tabs} active={note} onSelect={setActiveNote} />
+              {/* With a single note there is nothing to switch between. */}
+              {tabs.length > 1 && <NoteTabs notes={tabs} active={note} onSelect={setActiveNote} />}
               <NoteView
                 key={`${current}/${note}`}
                 content={contents[note] ?? ''}

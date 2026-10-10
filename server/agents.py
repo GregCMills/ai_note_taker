@@ -48,6 +48,7 @@ from .sections import (
     Collapse,
     Document,
     Section,
+    count_lines,
     estimate_tokens,
     number_lines,
     number_sections,
@@ -121,8 +122,16 @@ def turn_limits(requests: int = config.LLM_MAX_STEPS) -> UsageLimits:
     return UsageLimits(request_limit=requests, output_tokens_limit=config.LLM_TURN_OUTPUT_TOKENS)
 
 
-def scribe_instructions(system_prompt: str, memory: NoteMemory) -> str:
-    text = system_prompt + "\n" + SCRIBE_RULES
+def scribe_instructions(system_prompt: str, memory: NoteMemory, notes_view: str = "") -> str:
+    """The scribe's system prompt. Ordered from what changes least to what changes most, so llama.cpp can reuse its
+    cache of everything up to the first change: rules, the user's saved instructions, the notes (which mostly
+    change at their end while dictating), then the summary of older conversation. Each turn's speech and the
+    recent turns come after this, as messages."""
+    text = (
+        f"{system_prompt}\n{SCRIBE_RULES}\n"
+        f"## The user's saved instructions for this project\n{memory.instructions or '(none yet)'}\n\n"
+        f"## The notes, as they are at the start of this turn\n{notes_view}\n"
+    )
     if memory.history_summary:
         text += f"\n## Earlier in this session\n{memory.history_summary}\n"
     return text
@@ -133,11 +142,11 @@ CONTROL_TOKEN = re.compile(r"<\|[a-z_]+\|?>")
 
 SCRIBE_RULES = """
 ## How this works
-You keep the notes for one project. A project has one or more notes, which the user sees as tabs. Each message gives you every note (the active one is the tab the user is looking at), the project's recent changes, new speech from the user (transcribed automatically, numbered S1, S2, ...), and the user's saved instructions for this project. Update the notes to reflect the new speech, then reply with one short line saying what you changed. Never repeat the notes in your reply.
+You keep the notes for one project. A project has one or more notes, which the user sees as tabs. The user's saved instructions for this project and every note (the active one is the tab the user is looking at) are at the end of these instructions. Each message gives the project's recent changes and new speech from the user (transcribed automatically, numbered S1, S2, ...). Update the notes to reflect the new speech, then reply in under ten words saying what you did (e.g. "Added the Lenin preservation details."). Never repeat the notes or the added text in your reply.
 
 Notes are split into sections whose ids are unique across the whole project. In a long project, sections near the top of a note may be shown as a summary, either whole ("collapsed") or just their earlier part ("partly-collapsed", with the end still shown word for word). Call open_section to read the full text before changing summarised text.
 
-- Change notes only with tools: insert_text to add text inside a section without removing anything, edit_section to change or remove text, write_section to add, rewrite or delete a whole section, move_section to reorder or move a section into another note, manage_note to create, rename, delete or switch to (open) a note.
+- Change notes only with tools: add_lines to add new lines (at the end of a note, or after a line number), edit_section to change a few words, replace_lines to rewrite, split or merge whole lines, delete_lines to remove lines, write_section to add, rewrite or delete a whole section, move_section to reorder or move a section into another note, manage_note to create, rename, delete or switch to (open) a note.
 - New sections go in the active note unless the user names another note or the content plainly belongs in an existing one.
 - Create a new note when the user asks for one (a new note, page or tab), or when their instructions say how to split things into notes.
 - A section is one heading plus its content. When adding a section, write only that section: never repeat a note's title or other sections.
@@ -156,7 +165,7 @@ Notes are split into sections whose ids are unique across the whole project. In 
 - Leave no empty or duplicate headings behind.
 - In stories, record what the story says. A word spoken in dialogue is not a character's name unless the story uses it as one.
 - Every line of text is shown with its line number, like "[23] It was raining.". The user sees the same numbers beside the note, counted per note, so "line 23", "text 23" or "number 23" means that line of the note they are looking at (the active one) unless they name another. To delete numbered lines, call delete_lines once with all of them. The numbers are not part of the text: never write them in old_text, new_text or anything else.
-- Keep old_text short: just the words being changed, enough to be unique, never the whole section. To add to the end of a section, use its last sentence or line as old_text and repeat it in new_text followed by the addition.
+- Never copy existing text just to add after it: add_lines needs only the new text. For edit_section keep old_text short: just the words being changed, enough to be unique.
 - Make one edit per section that needs changing, including sections the user's instructions ask you to keep up to date. When a tool replies OK that change is done: go on to the next change or reply, and never send the same call twice. Each reply lists the notes and sections as they are now.
 - Never invent content the user did not say.
 """
@@ -232,6 +241,31 @@ def compact_turn(messages: list[ModelMessage], speech: str) -> list[ModelMessage
     return compacted
 
 
+REPLY_WORDS = 12
+
+
+def as_examples(history: list[ModelMessage]) -> list[ModelMessage]:
+    """Past turns as the model should copy them. The model imitates its own history over the rules, so turns from
+    before add_lines existed, which append by copying the last line into edit_section, are shown as add_lines
+    calls, and long replies are cut short. Deterministic, so the prompt cache still matches."""
+    shown: list[ModelMessage] = []
+    for message in history:
+        if isinstance(message, ModelResponse):
+            parts = []
+            for part in message.parts:
+                if isinstance(part, ToolCallPart) and part.tool_name == "edit_section":
+                    args = part.args_as_dict()
+                    old, new = str(args.get("old_text", "")).rstrip(), str(args.get("new_text", ""))
+                    if old and new.startswith(old) and new[len(old):].strip():
+                        part = replace(part, tool_name="add_lines", args={"text": new[len(old):].strip("\n")})
+                elif isinstance(part, TextPart) and len(part.content.split()) > REPLY_WORDS:
+                    part = replace(part, content=" ".join(part.content.split()[:REPLY_WORDS]).rstrip(",;:") + ".")
+                parts.append(part)
+            message = replace(message, parts=parts)
+        shown.append(message)
+    return shown
+
+
 @dataclass
 class UiHooks:
     """How the scribe tells open browsers what it is doing, so the view can follow along."""
@@ -251,6 +285,8 @@ class ScribeDeps:
     hooks: UiHooks
     actions: list[str] = field(default_factory=list)
     failure_messages: set[str] = field(default_factory=set)
+    # The notes as shown in the system prompt: fixed for the whole turn, so every request in it reuses the cache.
+    notes_view: str = ""
     calls: dict[tuple, str | None] = field(default_factory=dict)  # call -> None if it worked, else its error
     last_call: tuple | None = None
     manager_requests: list[str] = field(default_factory=list)
@@ -288,7 +324,7 @@ class ScribeDeps:
         if any(text and SHORTENED.search(text) for text in texts):
             return self.fail(
                 'that text contains "… (N chars)", which marks a shortened copy from your history. Write out the '
-                "full text instead (the current notes and instructions are shown in full in the latest message)"
+                "full text instead (the current notes and instructions are shown in full in your instructions)"
             )
         return None
 
@@ -332,7 +368,7 @@ def dropped_warning(old_text: str, new_text: str) -> str:
     quoted = "; ".join(f'"{s[:80]}"' for s in dropped[:3])
     return (
         f" Note: these sentences from old_text are no longer in the section: {quoted}. If that was not intended, "
-        "put them back (and use insert_text to add text without removing any)."
+        "put them back (and use add_lines to add text without removing any)."
     )
 
 
@@ -387,43 +423,13 @@ class NoteAgents:
         started = time.monotonic()
         subruns: list[dict] = []
         SUBRUNS.set(subruns)
-        memory = self.memories.load(project)
-        memory.turn += 1
-        docs = self._load_project(project, memory)
-        if not docs:
-            raise NoteError(f'Project "{project}" has no notes (was it deleted?)')
-        active = next(n for n in (viewing, memory.active_note, *docs) if n in docs)
-
-        await self._compact_history(memory)
-        collapsed = await self._collapse(docs, memory)
-        deps = ScribeDeps(project, docs, active, memory, collapsed, system_prompt, hooks)
+        deps, prompt_start = await self._prepare(project, system_prompt, hooks, viewing)
+        memory, docs, active, collapsed = deps.memory, deps.docs, deps.active, deps.collapsed
         speech = "\n".join(f"S{s['id']}: {s['text']}" for s in segments)
-        recent = self.notes.log(project, config.RECENT_COMMITS_IN_CONTEXT)
-        commits = "\n".join(describe_commit(c) for c in recent)
-        # Commits newer than the scribe's own last one were made by the user (hand edits, reverts, restores).
-        by_hand = []
-        for commit in recent:
-            if commit["subject"].startswith("[S"):
-                break
-            by_hand.append(commit["subject"])
-        hand_note = (
-            f"Since your last turn the user changed the notes by hand ({'; '.join(by_hand)}). The notes below are "
-            "the current text: trust them over anything you remember writing.\n\n"
-            if by_hand
-            else ""
-        )
-        tabs = ", ".join(f'"{n}"' + (" (active: the user is looking at this one)" if n == active else "") for n in docs)
-        prompt = (
-            f'Project "{project}" has these notes, shown as tabs: {tabs}\n\n'
-            f"{render_project(docs, active, collapsed)}\n\n"
-            f"Recent changes (newest first; ask_history can undo or restore any of these):\n{commits}\n\n"
-            f"{hand_note}"
-            f"Update the notes as per this transcription:\n{speech}\n\n"
-            f"Remember this, the user's instructions for this project:\n{memory.instructions or '(none yet)'}"
-        )
+        prompt = prompt_start + speech
 
-        history = memory.history()
-        instructions = scribe_instructions(system_prompt, memory)
+        history = as_examples(memory.history())
+        instructions = scribe_instructions(system_prompt, memory, deps.notes_view)
         history_tokens = sum(estimate_tokens(describe_turn(t)) for t in memory.turns)
         await report("thinking")
         with capture_run_messages() as messages:
@@ -464,7 +470,7 @@ class NoteAgents:
             "actions": deps.actions,
             "commit": sha,
             "estimate": {
-                "instructions": estimate_tokens(instructions),
+                "instructions": estimate_tokens(instructions) - estimate_tokens(deps.notes_view),
                 "history": history_tokens,
                 "notes": estimate_tokens(render_project(docs, active, collapsed)),
                 "prompt": estimate_tokens(prompt),
@@ -477,6 +483,77 @@ class NoteAgents:
             "subruns": subruns,
         })
         return sha, summary or "; ".join(deps.actions) or "no change", deps.manager_requests
+
+    async def _prepare(
+        self, project: str, system_prompt: str, hooks: UiHooks, viewing: str | None
+    ) -> tuple[ScribeDeps, str]:
+        """Everything a turn shows the scribe, up to the new speech: (deps, the start of the user message).
+
+        Shared by process() and warm(), which must build exactly the same prompt for llama.cpp to reuse its cache.
+        """
+        memory = self.memories.load(project)
+        memory.turn += 1
+        docs = self._load_project(project, memory)
+        if not docs:
+            raise NoteError(f'Project "{project}" has no notes (was it deleted?)')
+        active = next(n for n in (viewing, memory.active_note, *docs) if n in docs)
+
+        await self._compact_history(memory)
+        collapsed = await self._collapse(docs, memory)
+        deps = ScribeDeps(project, docs, active, memory, collapsed, system_prompt, hooks)
+        recent = self.notes.log(project, config.RECENT_COMMITS_IN_CONTEXT)
+        commits = "\n".join(describe_commit(c) for c in recent)
+        # Commits newer than the scribe's own last one were made by the user (hand edits, reverts, restores).
+        by_hand = []
+        for commit in recent:
+            if commit["subject"].startswith("[S"):
+                break
+            by_hand.append(commit["subject"])
+        hand_note = (
+            f"Since your last turn the user changed the notes by hand ({'; '.join(by_hand)}). The notes in your "
+            "instructions are the current text: trust them over anything you remember writing.\n\n"
+            if by_hand
+            else ""
+        )
+        tabs = ", ".join(f'"{n}"' + (" (active: the user is looking at this one)" if n == active else "") for n in docs)
+        deps.notes_view = (
+            f'Project "{project}" has these notes, shown as tabs: {tabs}\n\n{render_project(docs, active, collapsed)}'
+        )
+        prompt_start = (
+            f"Recent changes (newest first; ask_history can undo or restore any of these):\n{commits}\n\n"
+            f"{hand_note}"
+            "Update the notes as per this transcription:\n"
+        )
+        return deps, prompt_start
+
+    async def warm(self, project: str, system_prompt: str, viewing: str | None = None) -> None:
+        """Have llama.cpp read the next turn's prompt up to where the speech will go, while the user is still talking.
+
+        Qwen 3.8 is partly a recurrent model, so llama.cpp can only resume a cached prompt from a checkpoint, and it
+        makes one just before the end of each request. A request ending where the next turn's speech will start
+        leaves a checkpoint there, so the real turn only has to read the new speech. Call with the project locked.
+        """
+        started = time.monotonic()
+        SUBRUNS.set([])
+
+        async def nothing(*_) -> None:
+            pass
+
+        deps, prompt_start = await self._prepare(project, system_prompt, UiHooks(nothing, nothing), viewing)
+        try:
+            await self.scribe.run(
+                prompt_start + "S0: (nothing yet)",
+                deps=deps,
+                message_history=as_examples(deps.memory.history()),
+                model_settings=ModelSettings(max_tokens=1),
+                usage_limits=UsageLimits(request_limit=1),
+            )
+        except Exception:  # the 1-token reply is cut off on purpose; only the prompt reading matters
+            pass
+        # Keep anything _prepare worked out (section summaries, renumbered notes), but not the turn it counted.
+        deps.memory.turn -= 1
+        self.memories.save(project, deps.memory)
+        log.info("Warmed the cache for %s in %.1fs", project, time.monotonic() - started)
 
     # ---- context management -------------------------------------------------------------------
 
@@ -559,6 +636,15 @@ class NoteAgents:
             info.summary, info.digest = result.output.strip(), digest
         return info.summary
 
+    async def tidy(self, project: str) -> None:
+        """Summarise old conversation between turns, so it doesn't hold up the next one. Call with the project locked."""
+        memory = self.memories.load(project)
+        before = len(memory.turns)
+        SUBRUNS.set([])
+        await self._compact_history(memory)
+        if len(memory.turns) != before:
+            self.memories.save(project, memory)
+
     async def _compact_history(self, memory: NoteMemory) -> None:
         """Fold older turns into the running summary once the history passes its token budget."""
         sizes = [estimate_tokens(describe_turn(turn)) for turn in memory.turns]
@@ -593,17 +679,104 @@ class NoteAgents:
 
         @scribe.instructions
         def instructions(ctx: RunContext[ScribeDeps]) -> str:
-            return scribe_instructions(ctx.deps.system_prompt, ctx.deps.memory)
+            return scribe_instructions(ctx.deps.system_prompt, ctx.deps.memory, ctx.deps.notes_view)
+
+        @scribe.tool
+        async def add_lines(
+            ctx: RunContext[ScribeDeps], text: str, after_line: int | None = None, note: str | None = None
+        ) -> str:
+            """Add new lines to a note without changing anything already there. Only the new text is needed.
+
+            Args:
+                text: The new text: one or more lines (paragraphs, bullets, dialogue).
+                after_line: The line number to add after. Omit to add at the end of the note; 0 for the very top.
+                note: Which note. Omit for the active note.
+            """
+            deps = ctx.deps
+            text = strip_line_numbers(text).strip("\n")
+            target = deps.match_note(note) if note else deps.active
+            if target is None:
+                return deps.fail(f'no note "{note}"')
+            if not text.strip():
+                return deps.fail("text is empty")
+            if refused := deps.copied_shortened(text) or deps.repeated("add", target, after_line, text):
+                return refused
+            doc = deps.docs[target]
+            last = doc.line_count()
+            if after_line is None or after_line >= last:
+                after_line = last
+            if after_line <= 0:
+                section = Section(None, text)
+                doc.sections.insert(0, section)
+            else:
+                found = doc.locate_line(after_line)
+                if found is None:
+                    return deps.fail(f"note \"{target}\" has no line {after_line}")
+                section, row = found
+                rows = section.text.split("\n")
+                # Keep a list tight when adding bullets after a bullet; otherwise start a new paragraph.
+                bullet = re.compile(r"^\s*([-*+]|\d+[.)])\s")
+                joiner = "" if bullet.match(rows[row]) and bullet.match(text) else "\n"
+                rows[row] = rows[row] + "\n" + joiner + text
+                section.text = "\n".join(rows)
+            deps.collapsed.pop(section.id, None)
+            where = "at the top" if after_line <= 0 else "at the end" if after_line == last else f"after line {after_line}"
+            await self._save(deps, [target], target, f"added lines {where}", [section.id] if section.id else [])
+            return f"OK, added {where}. {deps.outline()}"
+
+        @scribe.tool
+        async def replace_lines(
+            ctx: RunContext[ScribeDeps], first_line: int, last_line: int, text: str, note: str | None = None
+        ) -> str:
+            """Replace whole lines with new text: rewrite a line, merge several lines into one, or split one into several.
+
+            Args:
+                first_line: The first line to replace.
+                last_line: The last line to replace (the same as first_line for a single line).
+                text: The text that takes their place, in full.
+                note: Which note. Omit for the active note.
+            """
+            deps = ctx.deps
+            text = strip_line_numbers(text).strip("\n")
+            target = deps.match_note(note) if note else deps.active
+            if target is None:
+                return deps.fail(f'no note "{note}"')
+            if refused := deps.copied_shortened(text) or deps.repeated("replace", target, first_line, last_line, text):
+                return refused
+            if last_line < first_line:
+                return deps.fail("last_line is before first_line")
+            doc = deps.docs[target]
+            start = doc.locate_line(first_line)
+            if start is None or doc.locate_line(last_line) is None:
+                return deps.fail(f"note \"{target}\" has lines 1 to {doc.line_count()}")
+            if not text.strip():
+                return deps.fail("text is empty; use delete_lines to remove lines")
+            section, first_row = start
+            end = doc.locate_line(last_line)
+            if end[0] is not section:
+                return deps.fail(
+                    f"lines {first_line} to {last_line} are in different sections; replace them one section at a time"
+                )
+            rows = section.text.split("\n")
+            old_text = "\n".join(r.strip() for r in rows[first_row : end[1] + 1] if r.strip())
+            if "\n".join(r.strip() for r in text.split("\n") if r.strip()) == old_text:
+                return deps.fail("that text is the same as the lines already there, so nothing changes")
+            section.text = "\n".join([*rows[:first_row], text, *rows[end[1] + 1 :]])
+            deps.collapsed.pop(section.id, None)
+            span = f"line {first_line}" if first_line == last_line else f"lines {first_line}-{last_line}"
+            await self._save(deps, [target], target, f"replaced {span}", [section.id] if section.id else [])
+            return f"OK, replaced {span}.{dropped_warning(old_text, text)} {deps.outline()}"
 
         @scribe.tool
         async def edit_section(ctx: RunContext[ScribeDeps], section_id: int, old_text: str, new_text: str) -> str:
-            """Replace exact text inside one section. old_text must appear exactly once in it; use an empty new_text to delete.
+            """Change a few words inside one section: old_text must appear exactly once in it; an empty new_text deletes.
+            Not for adding text after existing text: use add_lines for that.
 
             Keep old_text short (a few words to a sentence), never the whole section.
 
             Args:
                 section_id: The section to edit (in any note).
-                old_text: The exact words being changed, just enough to be unique. To append, the section's last sentence.
+                old_text: The exact words being changed, just enough to be unique.
                 new_text: Replacement text.
             """
             deps = ctx.deps
@@ -619,8 +792,7 @@ class NoteAgents:
             if old_words >= EDIT_SHRINK_GUARD_WORDS and 0 < new_words < old_words / 2:
                 return deps.fail(
                     f"that would replace {old_words} words with {new_words}, deleting most of them. To add text, "
-                    "use a short old_text (e.g. the last sentence) and put it back in new_text followed by the "
-                    "addition. To delete text on purpose, use an empty new_text"
+                    "use add_lines. To delete text on purpose, use an empty new_text"
                 )
             found = deps.find(section_id)
             if found is None:
@@ -630,6 +802,16 @@ class NoteAgents:
             if fold is not None and fold.keep_from is None:
                 return deps.fail(f"section {section_id} is collapsed; call open_section({section_id}) first")
             count = section.text.count(old_text) if old_text else 0
+            added = new_text[len(old_text):] if old_text and new_text.startswith(old_text) else ""
+            if count and added.lstrip(" \t").startswith("\n"):
+                # Adding new lines by copying the text before them into old_text is slow (every word is written
+                # twice) and error-prone: anchored mid-quote, it once left a stray quote mark behind.
+                end = section.text.rfind(old_text) + len(old_text)
+                line = deps.docs[note].first_line(section) + count_lines(section.text[:end]) - 1
+                return deps.fail(
+                    f"to add new lines, use add_lines(text=<only the new text>, after_line={line}); edit_section is "
+                    "for changing existing words"
+                )
             if count > 1 and old_text.strip() and section.text.rstrip().endswith(old_text.strip()):
                 # Quoting the section's closing words means "add to the end": use the final occurrence.
                 cut = section.text.rstrip().rfind(old_text.strip())
@@ -678,44 +860,6 @@ class NoteAgents:
             ])
             note_missing = f" There was no line {', '.join(map(str, missing))}." if missing else ""
             return f"OK, deleted {listed}.{note_missing} Lines after these are now numbered lower. {deps.outline()}"
-
-        @scribe.tool
-        async def insert_text(ctx: RunContext[ScribeDeps], section_id: int, after_text: str, text: str) -> str:
-            """Insert new text into a section right after some existing text, without removing anything.
-            Use this to add a sentence or paragraph in the middle or at the end of a section.
-
-            Args:
-                section_id: The section to add to.
-                after_text: Exact existing text (a few words to a sentence) that the new text should follow.
-                text: The text to insert. It goes on a new line (a new paragraph) if after_text ends a line.
-            """
-            deps = ctx.deps
-            after_text, text = strip_line_numbers(after_text), strip_line_numbers(text)
-            if refused := deps.copied_shortened(text) or deps.repeated("insert", section_id, after_text, text):
-                return refused
-            found = deps.find(section_id)
-            if found is None:
-                return deps.fail(f"no section {section_id}")
-            note, section = found
-            fold = deps.collapsed.get(section_id)
-            if fold is not None and fold.keep_from is None:
-                return deps.fail(f"section {section_id} is collapsed; call open_section({section_id}) first")
-            anchor = after_text.strip()
-            count = section.text.count(anchor) if anchor else 0
-            if count == 0:
-                return deps.fail(f"after_text is not in section {section_id}; copy a few words exactly from the section")
-            if count > 1 and not section.text.rstrip().endswith(anchor):
-                return deps.fail(f"after_text appears {count} times in section {section_id}; include a few more words so it is unique")
-            # With repeats, quoting the section's closing words means "at the end".
-            cut = (section.text.rfind(anchor) if count > 1 else section.text.find(anchor)) + len(anchor)
-            rest = section.text[cut:]
-            if not rest.strip() or rest.lstrip(" \t").startswith("\n"):
-                # The anchor ends a line: the new text becomes its own paragraph.
-                section.text = section.text[:cut] + "\n\n" + text.strip() + rest
-            else:
-                section.text = section.text[:cut] + " " + text.strip() + rest
-            await self._save(deps, [note], note, f"insert into §{section_id}", [section_id])
-            return f"OK, inserted. {deps.outline()}"
 
         @scribe.tool
         async def write_section(

@@ -43,7 +43,8 @@ TLS_HOSTS = [h.strip() for h in _env("TLS_HOSTS", "").split(",") if h.strip()]
 NOTE_TOKEN_BUDGET = int(_env("NOTE_TOKEN_BUDGET", "20000"))
 # When a long section has to be summarised, this much of its end stays word for word.
 KEEP_TAIL_TOKENS = int(_env("KEEP_TAIL_TOKENS", "1500"))
-HISTORY_TOKEN_BUDGET = int(_env("HISTORY_TOKEN_BUDGET", "10000"))
-KEEP_RECENT_TURNS = int(_env("KEEP_RECENT_TURNS", "15"))
+# Recent turns come after the notes in the prompt, so they are re-read every turn: keep them short.
+HISTORY_TOKEN_BUDGET = int(_env("HISTORY_TOKEN_BUDGET", "4000"))
+KEEP_RECENT_TURNS = int(_env("KEEP_RECENT_TURNS", "8"))
 # How many recent commits the scribe sees each turn, so it knows what ask_history can undo.
 RECENT_COMMITS_IN_CONTEXT = int(_env("RECENT_COMMITS_IN_CONTEXT", "10"))
