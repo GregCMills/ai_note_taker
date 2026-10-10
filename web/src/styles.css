@@ -1399,6 +1399,19 @@ textarea.editor {
   flex: 1;
 }
 
+select.select {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  /* 16px or more stops iOS zooming in when the list is focused. */
+  font: inherit;
+  font-size: 16px;
+}
+
 .range-row {
   display: flex;
   align-items: center;

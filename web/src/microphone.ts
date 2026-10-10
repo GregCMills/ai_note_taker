@@ -41,13 +41,60 @@ registerProcessor('pcm-capture', PcmCapture)
 
 export type MicrophoneCapture = { stop: () => void }
 
+// The chosen microphone is a property of this device (phone, laptop), so it lives in this browser, not on the server.
+const CHOSEN_KEY = 'notetaker:microphone'
+
+/** The microphone picked in settings, or '' for the browser's default. */
+export const chosenMicrophone = (): string => {
+  try {
+    return localStorage.getItem(CHOSEN_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+export const chooseMicrophone = (deviceId: string) => {
+  try {
+    if (deviceId) localStorage.setItem(CHOSEN_KEY, deviceId)
+    else localStorage.removeItem(CHOSEN_KEY)
+  } catch {
+    // Storage blocked (private window): the choice just won't be remembered.
+  }
+}
+
+/** This device's microphones. Browsers hide their names until the page has been allowed to use the mic once. */
+export const listMicrophones = async (): Promise<MediaDeviceInfo[]> => {
+  if (!navigator.mediaDevices?.enumerateDevices) return []
+  const inputs = async () => (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput')
+  let devices = await inputs()
+  if (devices.every((device) => !device.label)) {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    stream.getTracks().forEach((track) => track.stop())
+    devices = await inputs()
+  }
+  return devices
+}
+
+const AUDIO = { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+
+const openMicrophone = async (): Promise<MediaStream> => {
+  const chosen = chosenMicrophone()
+  if (chosen) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: { ...AUDIO, deviceId: { exact: chosen } } })
+    } catch (error) {
+      // The chosen mic is gone (e.g. unplugged); fall back to the default rather than not recording.
+      if (!(error instanceof DOMException) || !['OverconstrainedError', 'NotFoundError'].includes(error.name)) throw error
+    }
+  }
+  return navigator.mediaDevices.getUserMedia({ audio: AUDIO })
+}
+
 export const startMicrophone = async (onChunk: (pcm: ArrayBuffer) => void): Promise<MicrophoneCapture> => {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error('Microphone needs HTTPS. Open this page via https:// and accept the certificate.')
   }
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  })
+  const stream = await openMicrophone()
   const context = new AudioContext()
   const moduleUrl = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }))
   await context.audioWorklet.addModule(moduleUrl)

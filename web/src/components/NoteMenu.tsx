@@ -40,7 +40,7 @@ export const NoteMenu = ({ connected, status, hasProject, onEdit, onRename, onPr
           </>
         )}
         <button className="menu-item" role="menuitem" onClick={choose(onPrompts)}>
-          Instructions &amp; prompt
+          Settings
         </button>
         {hasProject && (
           <button className="menu-item danger" role="menuitem" onClick={choose(onDelete)}>

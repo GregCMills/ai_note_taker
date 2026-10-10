@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { chooseMicrophone, chosenMicrophone, listMicrophones } from '../microphone'
 import type { Settings } from '../types'
 
 type SettingsDialogProps = {
@@ -14,6 +15,9 @@ export const SettingsDialog = ({ project, instructions, onClose }: SettingsDialo
   const [silenceMs, setSilenceMs] = useState(800)
   const [noteInstructions, setNoteInstructions] = useState(instructions)
   const [saving, setSaving] = useState(false)
+  const [microphones, setMicrophones] = useState<MediaDeviceInfo[] | null>(null)
+  const [microphone, setMicrophone] = useState(chosenMicrophone)
+  const [micError, setMicError] = useState<string | null>(null)
 
   useEffect(() => {
     void api.getSettings().then((loaded) => {
@@ -22,6 +26,17 @@ export const SettingsDialog = ({ project, instructions, onClose }: SettingsDialo
       setSilenceMs(loaded.silence_ms)
     })
   }, [])
+
+  useEffect(() => {
+    listMicrophones()
+      .then(setMicrophones)
+      .catch((error: Error) => setMicError(`Can't list microphones: ${error.message}`))
+  }, [])
+
+  const pickMicrophone = (deviceId: string) => {
+    setMicrophone(deviceId)
+    chooseMicrophone(deviceId)
+  }
 
   const save = async () => {
     setSaving(true)
@@ -47,6 +62,30 @@ export const SettingsDialog = ({ project, instructions, onClose }: SettingsDialo
               onChange={(event) => setNoteInstructions(event.target.value)}
             />
           </>
+        )}
+        <h2>Microphone</h2>
+        <p className="hint">
+          Which microphone this device records with. Pick the built-in one to stop Bluetooth earbuds being used.
+          Remembered on this device; applies from the next time you tap the mic.
+        </p>
+        {micError ? (
+          <p className="hint">{micError}</p>
+        ) : (
+          <select
+            className="select"
+            value={microphones?.some((device) => device.deviceId === microphone) ? microphone : ''}
+            disabled={!microphones}
+            onChange={(event) => pickMicrophone(event.target.value)}
+          >
+            <option value="">Default (the browser chooses)</option>
+            {microphones
+              ?.filter((device) => device.deviceId && device.deviceId !== 'default')
+              .map((device, index) => (
+                <option key={device.deviceId} value={device.deviceId}>
+                  {device.label || `Microphone ${index + 1}`}
+                </option>
+              ))}
+          </select>
         )}
         <h2>Pause length</h2>
         <p className="hint">
