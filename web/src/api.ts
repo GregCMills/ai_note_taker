@@ -1,11 +1,14 @@
 import type { Activity, ManagerData, ProjectDetail, ProjectSummary, Settings, Status } from './types'
 
+export const signInAgain = () => location.replace('/login.html')
+
 const request = async <T>(method: string, url: string, body?: unknown): Promise<T> => {
   const response = await fetch(url, {
     method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
+  if (response.status === 401) signInAgain()
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: response.statusText }))
     throw new Error(error.detail ?? response.statusText)
@@ -14,6 +17,8 @@ const request = async <T>(method: string, url: string, body?: unknown): Promise<
 }
 
 export const api = {
+  me: () => request<{ name: string }>('GET', '/api/me'),
+  logout: () => request('POST', '/api/logout'),
   status: () => request<Status>('GET', '/api/status'),
   listProjects: () => request<{ projects: ProjectSummary[] }>('GET', '/api/projects'),
   createProject: (name: string) => request<{ name: string }>('POST', '/api/projects', { name }),

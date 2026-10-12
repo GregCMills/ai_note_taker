@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { api } from './api'
 import type { ServerEvent } from './types'
 
 const RECONNECT_MS = 1500
@@ -24,7 +25,10 @@ export const useSocket = (onEvent: (event: ServerEvent) => void, onOpen: () => v
       socket.onmessage = (message) => handlersRef.current.onEvent(JSON.parse(message.data))
       socket.onclose = () => {
         setConnected(false)
-        if (!closed) retry = setTimeout(connect, RECONNECT_MS)
+        if (closed) return
+        // The server refuses the socket once the session has expired; api.me then goes back to the login page.
+        void api.me().catch(() => {})
+        retry = setTimeout(connect, RECONNECT_MS)
       }
       socketRef.current = socket
     }

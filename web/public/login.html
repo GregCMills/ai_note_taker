@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#16181d" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <title>Sign in · Live Notes</title>
+    <!-- Plain HTML, outside the React app, so it loads without being signed in. Colours match styles.css. -->
+    <style>
+      :root {
+        --bg: #f6f6f4;
+        --surface: #ffffff;
+        --border: #dcdcd7;
+        --text: #1c1d21;
+        --muted: #6b6d75;
+        --accent: #3b6fd8;
+        --accent-text: #ffffff;
+        --danger: #c2413b;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #16181d;
+          --surface: #1e2027;
+          --border: #343844;
+          --text: #e6e7ea;
+          --muted: #949aa8;
+          --accent: #6d9bff;
+          --accent-text: #0f1115;
+          --danger: #ff6b63;
+          color-scheme: dark;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--text);
+        font: 16px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+      form {
+        width: 100%;
+        max-width: 340px;
+        display: grid;
+        gap: 14px;
+        padding: 28px 24px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 22px;
+      }
+      label {
+        display: grid;
+        gap: 4px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+      input {
+        font: inherit;
+        color: var(--text);
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+      }
+      input:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      button {
+        font: inherit;
+        font-weight: 600;
+        margin-top: 6px;
+        padding: 11px;
+        border: 0;
+        border-radius: 8px;
+        background: var(--accent);
+        color: var(--accent-text);
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+      }
+      .error {
+        min-height: 1.5em;
+        margin: 0;
+        font-size: 14px;
+        color: var(--danger);
+      }
+    </style>
+  </head>
+  <body>
+    <form id="login">
+      <h1>Live Notes</h1>
+      <label>
+        Name
+        <input name="name" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus />
+      </label>
+      <label>
+        Password
+        <input name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button type="submit">Sign in</button>
+      <p class="error" role="alert"></p>
+    </form>
+    <script>
+      const form = document.getElementById('login')
+      const error = form.querySelector('.error')
+      const button = form.querySelector('button')
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault()
+        button.disabled = true
+        error.textContent = ''
+        try {
+          const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: form.name.value, password: form.password.value }),
+          })
+          if (response.ok) {
+            location.replace('/')
+            return
+          }
+          const body = await response.json().catch(() => ({}))
+          error.textContent = body.detail ?? `Sign-in failed (${response.status})`
+        } catch {
+          error.textContent = "Can't reach the server"
+        }
+        button.disabled = false
+      })
+    </script>
+  </body>
+</html>
