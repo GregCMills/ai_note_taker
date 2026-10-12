@@ -6,7 +6,7 @@ include:
   - compose.app.yml
 services:
   llm:
-    image: local/llama-cpp-turboquant:server-cuda
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: notetaker-llm
     tty: true
     volumes:
@@ -38,7 +38,7 @@ services:
       - --cache-type-k
       - q8_0
       - --cache-type-v
-      - turbo3
+      - q8_0
       - --reasoning
       - "off"
       - --temp
