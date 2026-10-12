@@ -103,12 +103,6 @@ docker compose -f docker-compose.qwen.yml exec app /venv/bin/python -m server.ac
 
 Everyone signed in to one account shares its projects, so give each person their own account.
 
-## Using it from outside your network
-
-To let people connect over the internet, forward **TCP port 8443** on your router to this machine. If your router sits behind your ISP's modem (its WAN address starts with `192.168.` or `10.`), forward the port on the modem as well. Then share `https://<your public IP>:8443`.
-
-Only do this once accounts are set up: every page and the live connection require signing in.
-
 ## Your data
 
 Everything lives in `data/`, which is ignored by git:
