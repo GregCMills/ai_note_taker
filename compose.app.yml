@@ -15,10 +15,13 @@ services:
   app:
     image: pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime
     container_name: notetaker-app
-    # The LLM is defined in docker-compose.gemma.yml or docker-compose.qwen.yml; the app copes with it starting later.
     depends_on:
       web:
         condition: service_completed_successfully
+      # Defined in docker-compose.gemma.yml or docker-compose.qwen.yml, so starting the app starts the LLM too.
+      # Only waits for the container to start, not the model to load: the app copes with the LLM being ready later.
+      llm:
+        condition: service_started
     working_dir: /app
     ports:
       - "8443:8443"
