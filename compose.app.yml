@@ -57,7 +57,7 @@ services:
         set -e
         command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends git >/dev/null; }
         [ -x /venv/bin/python ] || python -m venv --system-site-packages /venv
-        /venv/bin/pip install -q --disable-pip-version-check -r server/requirements.txt
+        /venv/bin/pip install -q --disable-pip-version-check -r server/requirements-gpu.txt
         exec setpriv --reuid=$$APP_UID --regid=$$APP_GID --clear-groups /venv/bin/python -m server.main
     deploy:
       resources:

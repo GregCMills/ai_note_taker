@@ -2,7 +2,7 @@
 
 Talk, and it writes your notes. You think out loud on your phone or computer, and a local LLM turns what you say into tidy, organised markdown notes as you go: merging related points, fixing earlier ones when you change your mind, and keeping each project's notes in tabs.
 
-Everything runs on your own machine. Speech-to-text and the LLM are both local; nothing is sent to a cloud service.
+By default everything runs on your own machine: speech-to-text and the LLM are both local, and nothing is sent to a cloud service. You can also run just the app and point it at LLM and speech-to-text services elsewhere.
 
 ## What it does
 
@@ -22,6 +22,8 @@ Everything runs on your own machine. Speech-to-text and the LLM are both local; 
     - [Qwen 3.8 27B](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF): slower (about 55 tokens/s) but more careful with edits.
     - [Gemma 4 26B-A4B](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF): fast (about 125 tokens/s), less careful with edits.
 - Disk space for the models. They download into `~/.cache/huggingface` on first start, which takes a while.
+
+No GPU? See [App only](#app-only-llm-and-speech-to-text-elsewhere) to use an LLM and speech-to-text service running somewhere else.
 
 ## Quick start
 
@@ -52,6 +54,36 @@ TLS_HOSTS=192.168.1.20,my-pc
 ```
 
 Then delete `data/certs/` and restart, so a new certificate is made.
+
+## App only (LLM and speech-to-text elsewhere)
+
+The app can run on its own, on any machine with Docker (no GPU), and reach the LLM and speech-to-text over the OpenAI API. They can be hosted services (OpenAI, Groq, OpenRouter, ...) or your own servers (llama.cpp's `llama-server`, vLLM, Ollama, [speaches](https://github.com/speaches-ai/speaches), ...).
+
+Put the services in `.env`:
+
+```
+LLM_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=sk-...
+LLM_MODEL=qwen/qwen3.8-27b
+STT_URL=https://api.groq.com/openai/v1
+STT_API_KEY=gsk_...
+STT_MODEL=whisper-large-v3-turbo
+```
+
+Then start it, and create accounts as above using `docker-compose.api.yml`:
+
+```bash
+./start.sh api
+```
+
+- The LLM must support tool calling (function calling); the AI edits notes through tools.
+- For a service on the same machine, use `host.docker.internal` as its host, e.g. `http://host.docker.internal:8080/v1`.
+- Hosted services charge per request, so two features are off by default in this mode:
+  - `LIVE_TRANSCRIPT`: showing words while you are still speaking, which re-sends the sentence about once a second.
+  - `LLM_WARMUP`: having the LLM read the next prompt ahead of time after each turn.
+
+  If your services are self-hosted, set both to `1` in `.env` for live words and faster turns.
+- Other optional settings: `STT_LANGUAGE` (default `en`; empty to auto-detect) and `LLM_CONTEXT` (your model's context size, shown in the agent inspector).
 
 ## Managing accounts
 
@@ -98,7 +130,7 @@ Server settings are environment variables in `compose.app.yml`, for example:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ASR_ENGINE` | `granite` | Speech-to-text: `granite` (more accurate) or `whisper` (faster-whisper large-v3-turbo) |
+| `ASR_ENGINE` | `granite` | Speech-to-text: `granite` (more accurate), `whisper` (faster-whisper large-v3-turbo), or `api` (see [App only](#app-only-llm-and-speech-to-text-elsewhere)) |
 | `WHISPER_LANGUAGE` | `en` | Language for Whisper; empty to auto-detect |
 | `LLM_API_KEY` | `test` | Key shared between the app and the LLM container (not exposed outside Docker) |
 

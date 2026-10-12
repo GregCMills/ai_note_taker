@@ -4,6 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+from . import config
 from .agentlog import AgentLog
 from .agents import STATUS, NoteAgents, UiHooks
 from .hub import Channel
@@ -248,7 +249,7 @@ class ProjectSession:
                 if not self._pending and ws.notes.project_exists(self.project):
                     try:
                         await ws.agents.tidy(self.project)
-                        if not self._pending:
+                        if not self._pending and config.LLM_WARMUP:
                             await ws.agents.warm(self.project, ws.settings.system_prompt, ws.viewing.get(self.project))
                     except Exception:
                         log.exception("Tidying %s failed", self.project)

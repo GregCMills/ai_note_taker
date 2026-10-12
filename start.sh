@@ -3,16 +3,17 @@
 # Ctrl+C stops and removes the containers.
 #   ./start.sh          Gemma (fast)
 #   ./start.sh qwen     Qwen (slower, more careful with edits)
+#   ./start.sh api      just the app, using the LLM and speech-to-text services set in .env
 set -euo pipefail
 cd "$(dirname "$0")"
 
-model=${1:-gemma}
-case $model in
-  gemma) other=qwen ;;
-  qwen) other=gemma ;;
-  *) echo "Usage: $0 [gemma|qwen]" >&2; exit 1 ;;
+setup=${1:-gemma}
+case $setup in
+  gemma | qwen) logged=(app llm) ;;
+  api) logged=(app) ;;
+  *) echo "Usage: $0 [gemma|qwen|api]" >&2; exit 1 ;;
 esac
-file=docker-compose.$model.yml
+file=docker-compose.$setup.yml
 
 # So files the containers write in ./data stay yours.
 export UID
@@ -29,8 +30,10 @@ stop() {
 }
 trap stop INT TERM
 
-# Both setups use the same container names, so the other one has to go first.
-docker compose -f "docker-compose.$other.yml" down 2>/dev/null || true
+# All setups use the same container names, so any other one has to go first.
+for other in gemma qwen api; do
+  [[ $other == "$setup" ]] || docker compose -f "docker-compose.$other.yml" down 2>/dev/null || true
+done
 
 compose up -d --force-recreate web app
 
@@ -44,5 +47,5 @@ fi
 echo "Ctrl+C to stop."
 echo
 
-compose logs -f --since 1m app llm || true
+compose logs -f --since 1m "${logged[@]}" || true
 stop

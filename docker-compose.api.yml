@@ -1,0 +1,78 @@
+# Just the note taker, using an LLM and a speech-to-text service that run elsewhere: no GPU needed here.
+#   ./start.sh api      or      docker compose -f docker-compose.api.yml up -d
+# Both services are reached over the OpenAI API, so they can be hosted (OpenAI, Groq, OpenRouter, ...) or your own
+# (llama.cpp's llama-server, vLLM, Ollama, speaches, ...). Set them in .env, e.g.:
+#   LLM_URL=https://openrouter.ai/api/v1
+#   LLM_API_KEY=...
+#   LLM_MODEL=qwen/qwen3.8-27b
+#   STT_URL=https://api.groq.com/openai/v1
+#   STT_API_KEY=...
+#   STT_MODEL=whisper-large-v3-turbo
+# For a service on this same machine, use host.docker.internal as its host, e.g. http://host.docker.internal:8080/v1
+# Uses the same container names as the other setups, so stop those first (start.sh does).
+name: real_time_note_taker
+services:
+  # Builds the React frontend into web/dist, then exits.
+  web:
+    image: node:20-alpine
+    container_name: notetaker-web
+    user: "${UID:-1000}:${GID:-1000}"
+    working_dir: /web
+    volumes:
+      - ./web:/web
+    command: sh -c "npm install --no-audit --no-fund && npm run build"
+
+  # A plain Python image: speech-to-text and the LLM run elsewhere, so no CUDA. Code is mounted and packages live in
+  # a persistent venv (separate from the GPU setups'), so restarts skip installs.
+  app:
+    image: python:3.12-slim
+    container_name: notetaker-app
+    depends_on:
+      web:
+        condition: service_completed_successfully
+    working_dir: /app
+    ports:
+      - "8443:8443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./server:/app/server
+      - ./web/dist:/app/web/dist
+      - ./data:/data
+      - notetaker-api-venv:/venv
+    environment:
+      APP_UID: ${UID:-1000}
+      APP_GID: ${GID:-1000}
+      DATA_DIR: /data
+      HOME: /tmp
+      PYTHONUNBUFFERED: "1"
+      LLM_URL: ${LLM_URL:?Set LLM_URL in .env, e.g. https://api.openai.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:?Set LLM_MODEL in .env to the model name the LLM service expects}
+      # Shown in the agent inspector only; set it to your model's context size.
+      LLM_CONTEXT: ${LLM_CONTEXT:-40960}
+      ASR_ENGINE: api
+      STT_URL: ${STT_URL:?Set STT_URL in .env, e.g. https://api.openai.com/v1}
+      STT_API_KEY: ${STT_API_KEY:-}
+      STT_MODEL: ${STT_MODEL:-whisper-1}
+      WHISPER_LANGUAGE: ${STT_LANGUAGE:-en}
+      # Hosted services bill each call: no re-transcribing sentences mid-speech, no LLM warm-up requests.
+      # Set both to 1 in .env if your services are self-hosted, for live words and faster turns.
+      LIVE_TRANSCRIPT: ${LIVE_TRANSCRIPT:-0}
+      LLM_WARMUP: ${LLM_WARMUP:-0}
+      TLS_HOSTS: ${TLS_HOSTS:-}
+    # Installs git and Python packages on first start (fast no-ops after), then runs the server
+    # as your user so files in ./data stay yours.
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq --no-install-recommends git >/dev/null; }
+        [ -x /venv/bin/python ] || python -m venv /venv
+        /venv/bin/pip install -q --disable-pip-version-check -r server/requirements.txt
+        exec setpriv --reuid=$$APP_UID --regid=$$APP_GID --clear-groups /venv/bin/python -m server.main
+    restart: unless-stopped
+
+volumes:
+  notetaker-api-venv:

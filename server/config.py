@@ -6,6 +6,10 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default).strip()
 
 
+def _flag(name: str, default: bool) -> bool:
+    return _env(name, "1" if default else "0").lower() not in ("0", "false", "no", "off", "")
+
+
 DATA_DIR = Path(_env("DATA_DIR", "/data"))
 WEB_DIR = Path(_env("WEB_DIR", str(Path(__file__).resolve().parent.parent / "web" / "dist")))
 
@@ -22,13 +26,24 @@ LIBRARIAN_MAX_TOKENS = int(_env("LIBRARIAN_MAX_TOKENS", "600"))
 # The llama-server context size (-c in docker-compose.gemma.yml / docker-compose.qwen.yml); shown in the agent inspector.
 LLM_CONTEXT = int(_env("LLM_CONTEXT", "40960"))
 
-# Speech-to-text engine: "granite" (IBM Granite Speech, more accurate) or "whisper" (faster-whisper).
+# Speech-to-text engine: "granite" (IBM Granite Speech, more accurate), "whisper" (faster-whisper), or "api" (any
+# OpenAI-compatible /audio/transcriptions endpoint at STT_URL, so speech-to-text can run on another machine or service).
 ASR_ENGINE = _env("ASR_ENGINE", "whisper")
+STT_URL = _env("STT_URL", "").rstrip("/")
+STT_API_KEY = _env("STT_API_KEY", "")
+STT_MODEL = _env("STT_MODEL", "whisper-1")
 GRANITE_MODEL = _env("GRANITE_MODEL", "ibm-granite/granite-speech-4.1-2b")
 WHISPER_MODEL = _env("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_DEVICE = _env("WHISPER_DEVICE", "cuda")
 WHISPER_COMPUTE_TYPE = _env("WHISPER_COMPUTE_TYPE", "float16")
 WHISPER_LANGUAGE = _env("WHISPER_LANGUAGE", "en") or None
+
+# Show words while a sentence is still being spoken, by transcribing it again about once a second. A hosted
+# speech-to-text API bills each of those calls, so docker-compose.api.yml turns this off.
+LIVE_TRANSCRIPT = _flag("LIVE_TRANSCRIPT", True)
+# After each turn, have the LLM read the next turn's prompt in advance so it starts faster (llama.cpp's prompt cache).
+# A hosted LLM bills that as an extra full request, so docker-compose.api.yml turns this off.
+LLM_WARMUP = _flag("LLM_WARMUP", True)
 
 # A pause this long ends a speech segment; segments are force-cut at MAX_SEGMENT_S.
 SILENCE_MS = int(_env("SILENCE_MS", "800"))

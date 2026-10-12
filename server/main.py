@@ -39,6 +39,9 @@ transcriber = make_transcriber(
     device=config.WHISPER_DEVICE,
     compute_type=config.WHISPER_COMPUTE_TYPE,
     language=config.WHISPER_LANGUAGE,
+    api_url=config.STT_URL,
+    api_key=config.STT_API_KEY,
+    api_model=config.STT_MODEL,
 )
 # Reported to the UI as "whisper" for compatibility; it is whichever speech-to-text engine is configured.
 whisper_state = {"state": "loading", "error": None, "engine": config.ASR_ENGINE}
@@ -120,6 +123,8 @@ class Recorder:
         self._segmenter = None
 
     def _maybe_partial(self) -> None:
+        if not config.LIVE_TRANSCRIPT:
+            return
         if self._partial_task and not self._partial_task.done():
             return
         if time.monotonic() - self._last_partial < PARTIAL_EVERY_S or not self._queue.empty():
@@ -271,9 +276,11 @@ async def me(workspace: CurrentWorkspace):
 
 @app.get("/api/status")
 async def status(_: CurrentWorkspace):
+    # /models is part of the OpenAI API, so this works for llama.cpp and hosted LLMs alike.
+    headers = {"Authorization": f"Bearer {config.LLM_API_KEY}"} if config.LLM_API_KEY else {}
     try:
         async with httpx.AsyncClient(timeout=3) as client:
-            llm_ok = (await client.get(config.LLM_URL.removesuffix("/v1") + "/health")).status_code == 200
+            llm_ok = (await client.get(config.LLM_URL + "/models", headers=headers)).status_code == 200
     except httpx.HTTPError:
         llm_ok = False
     return {"whisper": whisper_state, "llm": "ready" if llm_ok else "unavailable"}

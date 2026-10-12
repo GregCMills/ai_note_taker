@@ -1,7 +1,10 @@
-"""Turns a live 16 kHz PCM stream into speech segments (split at pauses) and transcribes them with Whisper."""
+"""Turns a live 16 kHz PCM stream into speech segments (split at pauses) and transcribes them."""
 
+import io
 import threading
+import wave
 
+import httpx
 import numpy as np
 from faster_whisper import WhisperModel
 from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -154,10 +157,55 @@ class GraniteTranscriber:
         return text
 
 
+def _wav(audio: np.ndarray) -> bytes:
+    pcm16 = (np.clip(audio, -1, 1) * 32767).astype("<i2")
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(SAMPLE_RATE)
+        wav.writeframes(pcm16.tobytes())
+    return buffer.getvalue()
+
+
+class ApiTranscriber:
+    """Sends each segment to an OpenAI-compatible speech-to-text API, with the same interface as `Transcriber`.
+
+    Works with OpenAI, Groq, and self-hosted servers such as speaches (faster-whisper behind the OpenAI API).
+    """
+
+    def __init__(self, url: str, api_key: str, model: str, language: str | None):
+        if not url:
+            raise ValueError("ASR_ENGINE=api needs STT_URL, e.g. https://api.openai.com/v1")
+        self._url = f"{url}/audio/transcriptions"
+        self._model = model
+        self._language = language
+        self._client = httpx.Client(timeout=60, headers={"Authorization": f"Bearer {api_key}"} if api_key else {})
+
+    def load(self) -> None:
+        """Nothing to load; the model lives on the other end."""
+
+    def transcribe(self, audio: np.ndarray, previous_text: str = "", fast: bool = False) -> str:
+        fields = {"model": self._model, "response_format": "json"}
+        if self._language:
+            fields["language"] = self._language
+        if previous_text:
+            fields["prompt"] = previous_text[-200:]
+        response = self._client.post(self._url, data=fields, files={"file": ("speech.wav", _wav(audio), "audio/wav")})
+        if response.is_error:
+            raise RuntimeError(f"speech-to-text API returned {response.status_code}: {response.text[:200]}")
+        text = response.json().get("text", "").strip()
+        if text.lower().strip(" .!?,") in HALLUCINATIONS:
+            return ""
+        return text
+
+
 def make_transcriber(engine: str, *, granite_model: str, whisper_model: str, device: str, compute_type: str,
-                     language: str | None) -> "Transcriber | GraniteTranscriber":
+                     language: str | None, api_url: str = "", api_key: str = "", api_model: str = ""):
     if engine == "granite":
         return GraniteTranscriber(granite_model, device)
     if engine == "whisper":
         return Transcriber(whisper_model, device, compute_type, language)
-    raise ValueError(f"Unknown ASR_ENGINE {engine!r}: use 'granite' or 'whisper'")
+    if engine == "api":
+        return ApiTranscriber(api_url, api_key, api_model, language)
+    raise ValueError(f"Unknown ASR_ENGINE {engine!r}: use 'granite', 'whisper' or 'api'")
