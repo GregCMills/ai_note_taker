@@ -785,6 +785,23 @@ textarea.editor {
   color: var(--danger);
 }
 
+.account-info {
+  display: grid;
+  gap: 2px;
+  padding: 4px 12px 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.account-name {
+  font-weight: 600;
+}
+
+.account-hint {
+  font-size: 14px;
+  color: var(--muted);
+}
+
 .menu-status {
   display: grid;
   gap: 6px;

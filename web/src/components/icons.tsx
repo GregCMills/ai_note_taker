@@ -20,6 +20,13 @@ export const MoreIcon = (props: IconProps) => (
   </Svg>
 )
 
+export const UserIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <circle cx="12" cy="8" r="4" />
+    <path d="M4 20c1.5-3.5 4.5-5 8-5s6.5 1.5 8 5" />
+  </Svg>
+)
+
 export const CloseIcon = (props: IconProps) => (
   <Svg {...props}>
     <path d="M6 6l12 12M18 6L6 18" />

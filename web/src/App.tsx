@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
+import { AccountMenu } from './components/AccountMenu'
 import { AgentButton } from './components/AgentButton'
 import { AgentInspector } from './components/AgentInspector'
 import { HistoryPanel } from './components/HistoryPanel'
-import { CloseIcon, CollapseIcon, ExpandIcon, HistoryIcon, MenuIcon, MicIcon, MoreIcon, PencilIcon, StopIcon, TranscriptIcon } from './components/icons'
+import { CloseIcon, CollapseIcon, ExpandIcon, HistoryIcon, MenuIcon, MicIcon, MoreIcon, PencilIcon, StopIcon, TranscriptIcon, UserIcon } from './components/icons'
 import { ManagerView } from './components/ManagerView'
 import { NoteMenu } from './components/NoteMenu'
 import { NoteTabs } from './components/NoteTabs'
@@ -80,6 +81,7 @@ export const App = () => {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [accountOpen, setAccountOpen] = useState(false)
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [activityVersion, setActivityVersion] = useState(0)
   const [agentStep, setAgentStep] = useState<AgentStep | null>(null)
@@ -368,6 +370,9 @@ export const App = () => {
         </div>
         <span className={`dot ${statusClass}`} aria-label={allReady ? 'All systems ready' : 'Not ready'} />
         <AgentButton agent={agent} step={agentStep} onClick={() => setInspectorOpen(true)} />
+        <button className="icon-button" onClick={() => setAccountOpen(true)} aria-label="Account">
+          <UserIcon />
+        </button>
         <button className="icon-button" onClick={() => setMenuOpen(true)} aria-label="Project options">
           <MoreIcon />
         </button>
@@ -486,6 +491,8 @@ export const App = () => {
           )}
         </div>
       </footer>
+
+      {accountOpen && <AccountMenu onClose={() => setAccountOpen(false)} />}
 
       {menuOpen && (
         <NoteMenu

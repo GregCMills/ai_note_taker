@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, signInAgain } from '../api'
+import { api } from '../api'
 import { chooseMicrophone, chosenMicrophone, listMicrophones } from '../microphone'
 import type { Settings } from '../types'
 
@@ -18,7 +18,6 @@ export const SettingsDialog = ({ project, instructions, onClose }: SettingsDialo
   const [microphones, setMicrophones] = useState<MediaDeviceInfo[] | null>(null)
   const [microphone, setMicrophone] = useState(chosenMicrophone)
   const [micError, setMicError] = useState<string | null>(null)
-  const [account, setAccount] = useState<string | null>(null)
 
   useEffect(() => {
     void api.getSettings().then((loaded) => {
@@ -26,10 +25,6 @@ export const SettingsDialog = ({ project, instructions, onClose }: SettingsDialo
       setPrompt(loaded.system_prompt)
       setSilenceMs(loaded.silence_ms)
     })
-  }, [])
-
-  useEffect(() => {
-    void api.me().then((me) => setAccount(me.name))
   }, [])
 
   useEffect(() => {
@@ -41,11 +36,6 @@ export const SettingsDialog = ({ project, instructions, onClose }: SettingsDialo
   const pickMicrophone = (deviceId: string) => {
     setMicrophone(deviceId)
     chooseMicrophone(deviceId)
-  }
-
-  const signOut = async () => {
-    await api.logout()
-    signInAgain()
   }
 
   const save = async () => {
@@ -116,14 +106,6 @@ export const SettingsDialog = ({ project, instructions, onClose }: SettingsDialo
         <h2>System prompt</h2>
         <p className="hint">How the LLM shapes all notes. Tool and undo instructions are added automatically.</p>
         <textarea className="editor" value={prompt} onChange={(event) => setPrompt(event.target.value)} />
-        <h2>Account</h2>
-        <div className="actions">
-          <p className="hint">Signed in as {account ?? '…'}. Your projects are private to you.</p>
-          <span className="spacer" />
-          <button className="button" onClick={signOut}>
-            Sign out
-          </button>
-        </div>
         <div className="actions">
           <button
             className="button"
