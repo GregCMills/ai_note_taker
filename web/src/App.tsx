@@ -327,7 +327,7 @@ export const App = () => {
   )
 
   useWakeLock(recording)
-  const fullscreen = useFullscreen()
+  const fullscreen = useFullscreen(setError)
 
   // An agent error is shown for a while, then cleared, so a failed turn can't leave a pill on screen for good.
   useEffect(() => {
