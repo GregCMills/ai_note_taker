@@ -7,6 +7,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 import httpx
+import numpy as np
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -78,15 +79,28 @@ class Recorder:
         self._utterance = 0
         self._partial_task: asyncio.Task | None = None
         self._last_partial = 0.0
+        self._samples = 0
+        self._peak = 0
+        self._ignored = 0
 
     def start(self, project: str) -> None:
         self.stop()
         self.project = project
         self._segmenter = Segmenter(self.workspace.settings.silence_ms, config.MAX_SEGMENT_S)
+        self._samples = self._peak = 0
+        log.info("%s started recording into %s", self.workspace.user, project)
 
     def feed(self, pcm: bytes) -> None:
         if not self._segmenter:
+            # Audio with no recording started: the browser thinks it is recording but the server doesn't.
+            if self._ignored == 0:
+                log.warning("%s is sending audio without starting a recording; ignoring it", self.workspace.user)
+            self._ignored += 1
             return
+        samples = np.frombuffer(pcm, dtype=np.int16)
+        self._samples += len(samples)
+        if len(samples):
+            self._peak = max(self._peak, int(np.abs(samples.astype(np.int32)).max()))
         for audio in self._segmenter.feed(pcm):
             self._utterance += 1
             self._queue.put_nowait((self.project, audio))
@@ -94,6 +108,11 @@ class Recorder:
 
     def stop(self) -> None:
         if self._segmenter:
+            # A peak near 0 means the browser sent silence (e.g. a muted or blocked microphone).
+            log.info(
+                "%s stopped recording: %.1fs of audio received, peak level %d%%",
+                self.workspace.user, self._samples / SAMPLE_RATE, round(self._peak / 327.68),
+            )
             for audio in self._segmenter.flush():
                 self._queue.put_nowait((self.project, audio))
             self._utterance += 1
